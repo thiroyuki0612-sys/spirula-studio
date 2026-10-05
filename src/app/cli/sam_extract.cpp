@@ -1,32 +1,21 @@
-// `spirula-sam extract` -- pull the sharpest frames out of a video, and
-// optionally mask them.
+// `spirula-sam extract` -- the sharpest frames of a video, optionally masked.
 //
-// The native replacement for reference/scripts/extract_frames.py, with the
-// OpenCV/ffmpeg/PyTorch stack replaced by this tree: decode is Vulkan Video,
-// the motion-blur metric is a compute shader, and masking is SAM on the same
-// device. Only the JPEG/PNG encode stays on the CPU, on a pool of worker
-// threads, because that is what it is good at.
-//
-// The frame-selection arithmetic is deliberately identical to the Python's
-// (a window of `keep` frames, one written every `skip`), so a dataset
-// extracted either way has the same file names for the same source frames --
-// which is also what lets the GUI fall back to ffmpeg + FrameSelect without
-// the output changing.
-//
-// This file is compiled only with -DSS_ENABLE_PATENTED=ON; the dispatcher
-// in sam_main.cpp explains the fallback when it is not.
+// Decode is Vulkan Video where the build and device have it and ffmpeg where
+// they do not (app/FrameDecode.h). Selection is extract_frames.py's -- a
+// window of `keep` frames, one written every `skip` -- so every decoder names
+// the same source frames alike.
 //
 //   spirula-sam extract clip.mp4 --skip 10
 //   spirula-sam extract clip.mp4 --skip 10 --model sam3-f16.ggml --text "person; car"
-//   spirula-sam extract dish.mov --model sam3-f16.ggml --text food \
-//                      --neg-text "cooked food" --mask-keep subject
 
+#include "app/FfmpegVideo.h"
 #include "app/FrameExtract.h"
 #include "app/Tools.h"
 #include "i18n/catalog/Cli.h"
 #include "i18n/catalog/Data.h"
 #include "i18n/catalog/SamHelp.h"
 #include "nn/core/Log.h"
+#include "birefnet/BiRefNet.h"
 #include "sam/Masking.h"
 #ifdef SS_TOOL_SFM
 #include "sfm/core/Telemetry.h"
@@ -36,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -89,6 +79,8 @@ void usage() {
     help_row("    --adaptive", H::xh_adaptive);
     help_row("    --adaptive-range <f>", H::xh_adaptive_range);
     help_row("    --threads <n>", H::xh_threads);
+    help_row("    --decoder <d>", H::xh_decoder);
+    help_row("    --ffmpeg <exe>", H::xh_ffmpeg);
 
     std::fprintf(stderr, "\n%s\n", H::xh_360_section.get());
     help_row("    --360 <mode>", H::xh_360);
@@ -96,7 +88,11 @@ void usage() {
     help_row("    --360-orient <y,p,r>", H::xh_360_orient);
 
     std::fprintf(stderr, "\n%s\n", H::xh_masking.get());
+    for (const std::string& l : spirula::i18n::wrap(H::model_kinds.get(), 76))
+        std::fprintf(stderr, "  %s\n", l.c_str());
     help_row("    --model <file>", H::xh_model);
+    help_row("    --detector <id>", H::opt_detector);
+    help_row("    --detector-threshold <f>", H::opt_detector_threshold);
     help_row("    --text <phrases>", H::xh_text);
     help_row("    --neg-text <ph>", H::xh_neg_text);
     help_row("    --mask-mode <m>", H::xh_mask_mode);
@@ -127,13 +123,16 @@ struct Options {
     bool   adaptive = false;
     float  adaptive_range = 4.0f;
     int    threads = 0;
+    app::FrameDecoder decoder = app::FrameDecoder::Auto;
+    std::string ffmpeg = "ffmpeg";
 
     std::string pano_mode = "faces";
     app::Pano360Options pano;
 
-    std::string model, text, neg_text, device;
+    std::string model, text, neg_text, device, detector;
+    float  detector_threshold = 0.3f;   // sam::MaskOptions, same default
     std::string mask_mode = "video";
-    bool   keep_subject = false;
+    std::optional<bool> keep_subject;   // unset: BiRefNet keeps, SAM removes
     int    detect_every = 1, memory_frames = 0, max_size = 1600;
     float  threshold = 0.5f, nms = 0.1f;
     float  dilate_ratio = 0.05f;   // sam::MaskOptions, same default
@@ -169,6 +168,20 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--adaptive-range")
             o.adaptive_range = std::strtof(next("--adaptive-range"), nullptr);
         else if (a == "--threads") o.threads = std::atoi(next("--threads"));
+        else if (a == "--decoder") {
+            const std::string d = next("--decoder");
+            if (d == "auto") o.decoder = app::FrameDecoder::Auto;
+            else if (d == "builtin") o.decoder = app::FrameDecoder::Builtin;
+            else if (d == "ffmpeg") o.decoder = app::FrameDecoder::Ffmpeg;
+            else {
+                std::fprintf(stderr, "%s\n",
+                             spirula::i18n::format(
+                                 spirula::i18n::msg::cli::sam_unexpected_argument,
+                                 {"--decoder " + d}).c_str());
+                return false;
+            }
+        }
+        else if (a == "--ffmpeg") o.ffmpeg = next("--ffmpeg");
         else if (a == "--360") o.pano_mode = next("--360");
         else if (a == "--360-size") o.pano.size = std::atoi(next("--360-size"));
         else if (a == "--360-orient") {
@@ -187,6 +200,9 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--neg-text") o.neg_text = next("--neg-text");
         else if (a == "--mask-mode") o.mask_mode = next("--mask-mode");
         else if (a == "--mask-keep") o.keep_subject = std::strcmp(next("--mask-keep"), "subject") == 0;
+        else if (a == "--detector") o.detector = next("--detector");
+        else if (a == "--detector-threshold")
+            o.detector_threshold = std::strtof(next("--detector-threshold"), nullptr);
         else if (a == "--mask-out") o.mask_dir = next("--mask-out");
         else if (a == "--detect-every") o.detect_every = std::atoi(next("--detect-every"));
         else if (a == "--memory-frames") o.memory_frames = std::atoi(next("--memory-frames"));
@@ -268,13 +284,23 @@ int sam_cli_extract(int argc, char** argv) {
     job.adaptive = o.adaptive;
     job.adaptive_range = o.adaptive_range;
     job.threads = o.threads;
+    job.decoder = o.decoder;
+    job.ffmpeg_exe = o.ffmpeg;
     job.write_overlay = o.overlay;
     // A 360 file is recognised by its packing, not by its name, and only then
     // is there anything for --360 to select.
     if (o.pano_mode != "off") {
+        std::vector<std::pair<int, int>> tracks;
+#ifdef SS_HAVE_VIDEO
         std::string err;
-        const std::vector<std::pair<int, int>> tracks =
-            app::video_track_sizes(o.input, err);
+        tracks = app::video_track_sizes(o.input, err);
+#endif
+        if (tracks.empty()) {
+            app::VideoFacts facts;
+            const std::atomic<bool> never{false};
+            if (app::ffmpeg_probe_video(o.ffmpeg, o.input, facts, never))
+                tracks = facts.tracks;
+        }
         app::Pano360Meta meta;
 #ifdef SS_TOOL_SFM
         const sfm::VideoProjection pr = sfm::video_projection(o.input);
@@ -299,7 +325,10 @@ int sam_cli_extract(int argc, char** argv) {
         job.mask.text = o.text;
         job.mask.neg_text = o.neg_text;
         job.mask.video = o.mask_mode != "image";
-        job.mask.keep_prompted = o.keep_subject;
+        job.mask.keep_prompted = o.keep_subject.value_or(
+            birefnet::find_model_source(o.model) || birefnet::is_checkpoint(o.model));
+        job.mask.detector = o.detector;
+        job.mask.detector_threshold = o.detector_threshold;
         job.mask.threshold = o.threshold;
         job.mask.nms = o.nms;
         job.mask.dilate_ratio = o.dilate_ratio;

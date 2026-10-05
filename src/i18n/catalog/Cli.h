@@ -108,6 +108,20 @@ SS_MSG(tool_geometry,
     NL("diepte en oppervlaktenormalen van een dataset schatten"),
     RU("оценить глубину и нормали поверхности набора данных"),
     TR("bir veri kümesinin derinliğini ve yüzey normallerini kestir"));
+SS_MSG(tool_partition,
+    EN("split a reconstruction into parts to train separately, and merge them"),
+    JA("再構成を別々に学習するパートに分割し、あとで結合する"),
+    ZH_HANS("把重建拆成可分别训练的分区，再合并"),
+    ZH_HANT("把重建拆成可分別訓練的分區，再合併"),
+    KO("재구성을 따로 학습할 파트로 나누고 다시 병합"),
+    DE("eine Rekonstruktion in getrennt trainierbare Teile zerlegen und zusammenführen"),
+    FR("découper une reconstruction en parties à entraîner séparément, puis les fusionner"),
+    ES("dividir una reconstrucción en partes para entrenar por separado y fusionarlas"),
+    PT("dividir uma reconstrução em partes para treinar em separado e fundi-las"),
+    IT("dividere una ricostruzione in parti da addestrare separatamente e unirle"),
+    NL("een reconstructie splitsen in apart te trainen delen en ze samenvoegen"),
+    RU("разбить реконструкцию на части для раздельного обучения и объединить их"),
+    TR("bir yeniden oluşturmayı ayrı eğitilecek parçalara böl ve birleştir"));
 SS_MSG(tool_encode,
     EN("encode raw RGB frames into a video on the GPU"),
     JA("生のRGBフレームをGPUで動画にエンコードする"),
@@ -633,6 +647,22 @@ SS_MSG(error_line,
     RU("ошибка: {0}"),
     TR("hata: {0}"));
 
+// {0} is a URL.
+SS_MSG(details_line,
+    EN("Details: {0}"),
+    JA("詳細: {0}"),
+    ZH_HANS("详情：{0}"),
+    ZH_HANT("詳情：{0}"),
+    KO("자세한 내용: {0}"),
+    DE("Details: {0}"),
+    FR("Détails : {0}"),
+    ES("Detalles: {0}"),
+    PT("Detalhes: {0}"),
+    IT("Dettagli: {0}"),
+    NL("Details: {0}"),
+    RU("Подробности: {0}"),
+    TR("Ayrıntılar: {0}"));
+
 
 // ===========================================================================
 // `spirula sam` -- what a run says around its own work
@@ -877,48 +907,6 @@ SS_MSG(sam_no_video_decoder,
        "-DSS_ENABLE_PATENTED=ON ile derlenir (bkz. cmake/SsOptions.cmake). Bir "
        "dosyayı incelemek ya da kare çıkarmak için ffmpeg kullanın."));
 
-SS_MSG(sam_extract_needs_decoder,
-    EN("`extract` needs the in-process video decoder, which is compiled only "
-       "with -DSS_ENABLE_PATENTED=ON (see cmake/SsOptions.cmake). Extract "
-       "frames with ffmpeg and mask them with `{0} track` instead."),
-    JA("`extract` にはプロセス内の動画デコーダーが必要ですが、これは "
-       "-DSS_ENABLE_PATENTED=ON でのみ組み込まれます（cmake/SsOptions.cmake 参照）。"
-       "ffmpeg でフレームを取り出し、`{0} track` でマスクしてください。"),
-    ZH_HANS("`extract` 需要进程内视频解码器，而它只在 -DSS_ENABLE_PATENTED=ON 时编译"
-            "（见 cmake/SsOptions.cmake）。请用 ffmpeg 提取帧，再用 `{0} track` 遮罩。"),
-    ZH_HANT("`extract` 需要行程內視訊解碼器，而它只在 -DSS_ENABLE_PATENTED=ON 時編譯"
-            "（見 cmake/SsOptions.cmake）。請用 ffmpeg 擷取影格，再用 `{0} track` 遮罩。"),
-    KO("`extract` 에는 프로세스 내 비디오 디코더가 필요한데, 이는 "
-       "-DSS_ENABLE_PATENTED=ON 일 때만 컴파일됩니다(cmake/SsOptions.cmake 참고). "
-       "ffmpeg 으로 프레임을 뽑고 `{0} track` 으로 마스크하세요."),
-    DE("`extract` braucht den prozessinternen Videodekoder, der nur mit "
-       "-DSS_ENABLE_PATENTED=ON übersetzt wird (siehe cmake/SsOptions.cmake). "
-       "Entnehmen Sie die Einzelbilder mit ffmpeg und maskieren Sie sie mit "
-       "`{0} track`."),
-    FR("`extract` a besoin du décodeur vidéo intégré, qui n'est compilé qu'avec "
-       "-DSS_ENABLE_PATENTED=ON (voir cmake/SsOptions.cmake). Extrayez les "
-       "images avec ffmpeg et masquez-les avec `{0} track`."),
-    ES("`extract` necesita el descodificador de vídeo del propio proceso, que "
-       "solo se compila con -DSS_ENABLE_PATENTED=ON (mira "
-       "cmake/SsOptions.cmake). Extrae los fotogramas con ffmpeg y enmascáralos "
-       "con `{0} track`."),
-    PT("`extract` precisa do decodificador de vídeo no próprio processo, que só "
-       "é compilado com -DSS_ENABLE_PATENTED=ON (veja cmake/SsOptions.cmake). "
-       "Extraia os quadros com o ffmpeg e mascare-os com `{0} track`."),
-    IT("`extract` richiede il decodificatore video nel processo, compilato solo "
-       "con -DSS_ENABLE_PATENTED=ON (veda cmake/SsOptions.cmake). Estragga i "
-       "fotogrammi con ffmpeg e li mascheri con `{0} track`."),
-    NL("`extract` heeft de videodecoder in het proces zelf nodig, die alleen "
-       "met -DSS_ENABLE_PATENTED=ON gecompileerd wordt (zie "
-       "cmake/SsOptions.cmake). Haal de beelden eruit met ffmpeg en maskeer ze "
-       "met `{0} track`."),
-    RU("`extract` требует внутрипроцессного видеодекодера, который собирается "
-       "только с -DSS_ENABLE_PATENTED=ON (см. cmake/SsOptions.cmake). Извлеките "
-       "кадры через ffmpeg и замаскируйте их через `{0} track`."),
-    TR("`extract`, süreç içi video çözücüyü ister; o da yalnızca "
-       "-DSS_ENABLE_PATENTED=ON ile derlenir (bkz. cmake/SsOptions.cmake). "
-       "Kareleri ffmpeg ile çıkarıp `{0} track` ile maskeleyin."));
-
 SS_MSG(sam_video_decode,
     EN("Vulkan video decode: available"),
     JA("Vulkan の動画デコード: 使えます"),
@@ -1142,6 +1130,27 @@ SS_MSG(sfm_merge_output_is_input,
        "--in-place, если так и задумано"),
     TR("--output {0} zaten girdi modellerinin bulunduğu yer; istediğiniz buysa "
        "--in-place verin"));
+
+SS_MSG(sam_subject_no_prompt,
+    EN("{0} masks the main subject by itself; the text prompts and clicks are ignored"),
+    JA("{0} は主な被写体を自動でマスクします。テキストプロンプトとクリックは無視されます"),
+    ZH_HANS("{0} 会自动遮出主体；文本提示与点击都会被忽略"),
+    ZH_HANT("{0} 會自動遮出主體；文字提示與點選都會被忽略"),
+    KO("{0} 는 주 피사체를 스스로 마스크합니다. 텍스트 프롬프트와 클릭은 무시됩니다"),
+    DE("{0} maskiert das Hauptmotiv von selbst; Textprompts und Klicks werden ignoriert"),
+    FR("{0} masque seul le sujet principal ; les consignes textuelles et les clics sont "
+       "ignorés"),
+    ES("{0} enmascara por sí solo el sujeto principal; se ignoran las indicaciones de "
+       "texto y los clics"),
+    PT("{0} mascara sozinho o objeto principal; os comandos de texto e os cliques são "
+       "ignorados"),
+    IT("{0} maschera da solo il soggetto principale; prompt testuali e clic vengono "
+       "ignorati"),
+    NL("{0} maskeert uit zichzelf het hoofdonderwerp; tekstprompts en klikken worden "
+       "genegeerd"),
+    RU("{0} сам выделяет главный объект; текстовые запросы и щелчки не учитываются"),
+    TR("{0} ana özneyi kendiliğinden maskeler; metin istemleri ve tıklamalar yok "
+       "sayılır"));
 
 }  // namespace cli
 }  // namespace msg

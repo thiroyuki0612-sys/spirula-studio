@@ -1,21 +1,12 @@
 // spirula-sam -- segmentation, tracking and frame extraction from a shell.
 //
-//   spirula-sam devices
 //   spirula-sam segment --model m.ggml --image cat.jpg --text "cat" --out out/
-//   spirula-sam segment --model m.ggml --image cat.jpg --point 315,250 --out out/
 //   spirula-sam track   --model m.ggml --frames frames/ --text "person" --out out/
-//   spirula-sam video   --info clip.mp4
 //   spirula-sam extract clip.mp4 --skip 30 --model m.ggml --text "person"
 //
-// The GUI drives the same library in-process (src/app/gui/DatasetPrep.cpp);
-// this is the scriptable face of it, and how a masking or extraction problem
-// gets reproduced without the GUI in the way.
-//
-// `video` and `extract` need the in-process decoder, which is only built with
-// -DSS_ENABLE_PATENTED=ON (src/app/cli/sam_extract.cpp); without it they
-// say so and point at ffmpeg.
-//
-// Diagnostics go to stderr, the result table to stdout, so a run pipes cleanly:
+// The scriptable face of what the GUI drives in-process (src/app/gui/DatasetPrep.cpp).
+// `video` needs the in-process decoder (-DSS_ENABLE_PATENTED=ON); `extract`
+// falls back to ffmpeg. Diagnostics go to stderr, the result table to stdout:
 //   spirula-sam segment ... 2>/dev/null > detections.tsv
 
 #include "app/Tools.h"
@@ -28,6 +19,7 @@
 #include "nn/core/Log.h"
 #include "nn/Device.h"
 #include "nn/io/Image.h"
+#include "birefnet/BiRefNet.h"
 #include "sam/Masking.h"
 #include "sam/Sam.h"
 #ifdef SS_HAVE_VIDEO
@@ -90,7 +82,10 @@ void usage() {
     std::fprintf(stderr, "\n");
 
     line("segment --model <file> --image <file> [options]");
+    para(H::model_kinds);
     help_row("--text <phrase>", H::seg_text);
+    help_row("--detector <id|file>", H::opt_detector);
+    help_row("--detector-threshold <f>", H::opt_detector_threshold);
     help_row("--box x0,y0,x1,y1", H::seg_box);
     help_row("--neg-box x0,y0,x1,y1", H::seg_neg_box);
     help_row("--point x,y", H::seg_point);
@@ -118,7 +113,9 @@ void usage() {
     help_row("--memory-frames <n>", H::trk_memory_frames);
     help_row("--max-frames <n>", H::trk_max_frames);
     help_row("--out <dir>", H::trk_out);
+    help_row("--detector <id|file>", H::opt_detector);
     help_row("--keep-prompted", H::trk_keep_prompted);
+    help_row("--remove-prompted", H::trk_remove_prompted);
     help_row("--dilate-ratio <f>", H::mask_dilate);
     help_row("--overlay", H::trk_overlay);
     std::fprintf(stderr, "\n");
@@ -158,6 +155,7 @@ void usage() {
     help_row("--max-size <n>", H::common_max_size);
     help_row("--image-gamut <name>", H::common_image_gamut);
     help_row("--image-linear / --no-image-linear", H::common_image_linear);
+    help_row("--image-exposure auto|<stops>", H::common_image_exposure);
     std::fprintf(stderr,
                  "%s SS_NN_LOG=0..3  SS_VK_DEVICE  SS_PROFILE=1\n"
                  "             SS_VK_VALIDATION=1  SS_NN_DEBUG_SYNC=1\n",
@@ -182,6 +180,9 @@ bool parse_floats(const char* s, float* out, int n) {
 struct Options {
     std::string command;
     std::string model, image, frames, out_dir, text, neg_text, video_path;
+    std::string detector;
+    float detector_threshold = 0.3f;   // sam::MaskOptions, same default
+    std::optional<bool> keep;          // --keep-prompted / --remove-prompted
     std::string device;
     std::vector<sam::Box> pos_boxes, neg_boxes;
     std::vector<sam::Point> pos_points, neg_points;
@@ -193,7 +194,7 @@ struct Options {
     int     cur_object = 0;
     int64_t cur_frame = 0;
     bool multimask = false, show_vram = false, profile = false, validate = false;
-    bool overlay = false, keep_prompted = false;
+    bool overlay = false;
     float threshold = 0.5f, nms = 0.1f;
     float dilate_ratio = 0.05f;   // sam::MaskOptions, same default
     int max_frames = 0;
@@ -202,7 +203,8 @@ struct Options {
 
     // The frames' colour space; they convert to sRGB before the model sees them.
     std::string image_gamut;
-    std::optional<bool> image_is_linear;   // unset: an EXR's own header decides
+    std::optional<bool> image_is_linear;   // unset: the file's own declaration
+    colorspace::Exposure image_exposure;
 
     // `mask`
     std::string shape_spec, mask_image, preview;
@@ -242,6 +244,8 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--image-gamut") o.image_gamut = next("--image-gamut");
         else if (a == "--image-linear") o.image_is_linear = true;
         else if (a == "--no-image-linear") o.image_is_linear = false;
+        else if (a == "--image-exposure" &&
+                 colorspace::parse_exposure(next("--image-exposure"), o.image_exposure)) {}
         else if (a == "--frames") o.frames = next("--frames");
         else if (a == "--out") o.out_dir = next("--out");
         else if (a == "--text") o.text = next("--text");
@@ -249,7 +253,11 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--detect-every") o.detect_every = std::atoi(next("--detect-every"));
         else if (a == "--memory-frames") o.memory_frames = std::atoi(next("--memory-frames"));
         else if (a == "--max-size") o.max_size = std::atoi(next("--max-size"));
-        else if (a == "--keep-prompted") o.keep_prompted = true;
+        else if (a == "--keep-prompted") o.keep = true;
+        else if (a == "--remove-prompted") o.keep = false;
+        else if (a == "--detector") o.detector = next("--detector");
+        else if (a == "--detector-threshold")
+            o.detector_threshold = std::strtof(next("--detector-threshold"), nullptr);
         else if (a == "--info") o.video_path = next("--info");
         else if (a == "--device") o.device = next("--device");
         else if (a == "--threshold") o.threshold = std::strtof(next("--threshold"), nullptr);
@@ -372,6 +380,57 @@ void write_results(const Options& o, const nn::Image& image, const sam::Result& 
                         {(long long)r.detections.size(), o.out_dir}).c_str());
 }
 
+// The one mapping from the command line to the mask policy, shared by
+// `segment` (on BiRefNet or Grounding DINO) and `track`.
+sam::MaskOptions mask_options(const Options& o) {
+    sam::MaskOptions mo;
+    mo.model = o.model;
+    mo.device = o.device;
+    mo.detector = o.detector;
+    mo.detector_threshold = o.detector_threshold;
+    mo.text = o.text;
+    mo.neg_text = o.neg_text;
+    const bool subject = birefnet::find_model_source(o.model) || birefnet::is_checkpoint(o.model);
+    // BiRefNet's mask IS the subject, so keeping it is what a bare run means.
+    mo.keep_prompted = o.keep.value_or(subject);
+    if (subject && (!o.text.empty() || !o.neg_text.empty() || !o.seeds.empty()))
+        std::fprintf(stderr, "%s\n", format(cmsg::sam_subject_no_prompt, {o.model}).c_str());
+    mo.threshold = o.threshold;
+    mo.nms = o.nms;
+    mo.dilate_ratio = o.dilate_ratio;
+    mo.detect_every = o.detect_every;
+    mo.memory_frames = o.memory_frames;
+    mo.max_size = o.max_size;
+    mo.img_size = o.img_size;
+    mo.validate = o.validate;
+    mo.profile = o.profile;
+    mo.seeds = o.seeds;
+    return mo;
+}
+
+// `segment` through the mask policy: the path for a model that is not a SAM
+// session on its own -- BiRefNet, or SAM 2 with Grounding DINO finding boxes.
+int segment_with_masker(const Options& o) {
+    nn::Image image =
+        nn::load_image(o.image, o.image_gamut, o.image_is_linear, o.image_exposure);
+    if (image.empty()) return 1;
+    sam::MaskOptions mo = mask_options(o);
+    mo.video = false;
+    mo.max_size = 0;
+    sam::Masker masker;
+    std::string error;
+    sam::Mask mask;
+    sam::Result r;
+    if (!masker.init(mo, error) || !masker.run(image, mask, &r, 0)) {
+        std::fprintf(stderr, "%s\n",
+                     format(cmsg::error_line, {error.empty() ? masker.lastError() : error}).c_str());
+        return 1;
+    }
+    write_results(o, image, r, "seg");
+    if (!o.out_dir.empty()) sam::save_mask_png(mask, o.out_dir + "/seg_mask.png");
+    return 0;
+}
+
 bool load_session(const Options& o, sam::Session& session) {
     sam::ModelParams mp;
     mp.model_path = o.model;
@@ -395,10 +454,14 @@ int cmd_segment(const Options& o) {
         std::fprintf(stderr, "%s\n", cmsg::sam_segment_needs.get());
         return 2;
     }
+    if (!o.detector.empty() || birefnet::find_model_source(o.model) ||
+        birefnet::is_checkpoint(o.model))
+        return segment_with_masker(o);
     sam::Session session;
     if (!load_session(o, session)) return 1;
 
-    nn::Image image = nn::load_image(o.image, o.image_gamut, o.image_is_linear);
+    nn::Image image =
+        nn::load_image(o.image, o.image_gamut, o.image_is_linear, o.image_exposure);
     if (image.empty()) return 1;
     if (!session.encodeImage(image)) {
         std::fprintf(stderr, "%s\n",
@@ -448,7 +511,7 @@ int cmd_track(const Options& o) {
         std::string ext = e.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" ||
-            ext == ".exr")
+            ext == ".exr" || ext == ".tif" || ext == ".tiff")
             files.push_back(e.path().string());
     }
     std::sort(files.begin(), files.end());
@@ -463,22 +526,7 @@ int cmd_track(const Options& o) {
     // The mask policy -- several concepts, negatives that carve back out, and
     // which side of the mask is white -- lives in sam/Masking.h, shared with
     // `extract` and with the GUI so none of the three can disagree.
-    sam::MaskOptions mo;
-    mo.model = o.model;
-    mo.device = o.device;
-    mo.text = o.text;
-    mo.neg_text = o.neg_text;
-    mo.keep_prompted = o.keep_prompted;
-    mo.threshold = o.threshold;
-    mo.nms = o.nms;
-    mo.dilate_ratio = o.dilate_ratio;
-    mo.detect_every = o.detect_every;
-    mo.memory_frames = o.memory_frames;
-    mo.max_size = o.max_size;
-    mo.img_size = o.img_size;
-    mo.validate = o.validate;
-    mo.profile = o.profile;
-    mo.seeds = o.seeds;
+    const sam::MaskOptions mo = mask_options(o);
 
     sam::Masker masker;
     std::string error;
@@ -500,9 +548,10 @@ int cmd_track(const Options& o) {
     std::future<Loaded> ahead;
     auto load_at = [&](size_t i) {
         return std::async(std::launch::async,
-                          [p = files[i], g = o.image_gamut, l = o.image_is_linear] {
+                          [p = files[i], g = o.image_gamut, l = o.image_is_linear,
+                           e = o.image_exposure] {
                               Loaded out;
-                              out.img = app::load_upright(p, g, l, out.turn);
+                              out.img = app::load_upright(p, g, l, e, out.turn);
                               return out;
                           });
     };
@@ -589,8 +638,8 @@ int cmd_track(const Options& o) {
 
 void write_preview(const std::string& frame, const app::FrameMask& fm,
                    const std::string& path, const std::string& gamut,
-                   std::optional<bool> is_linear) {
-    nn::Image img = nn::load_image(frame, gamut, is_linear);
+                   std::optional<bool> is_linear, const colorspace::Exposure& exposure) {
+    nn::Image img = nn::load_image(frame, gamut, is_linear, exposure);
     if (img.empty()) return;
     std::vector<uint8_t> px;
     std::string err;
@@ -638,12 +687,15 @@ int cmd_mask(const Options& o) {
         std::string bad, title;
         const bool svg = o.shape_spec.size() > 4 &&
                          o.shape_spec.compare(o.shape_spec.size() - 4, 4, ".svg") == 0;
-        if (svg ? !app::load_mask_svg(o.shape_spec, run.stencil.mask.shapes, title, bad)
-                : !app::parse_mask_shapes(o.shape_spec, run.stencil.mask.shapes, bad)) {
+        // A file the GUI saved for one camera brings its set's other cameras.
+        app::MaskSet set;
+        if (svg ? !app::load_mask_svg_set(o.shape_spec, set, title, bad)
+                : !app::parse_mask_shapes(o.shape_spec, set.shapes, bad)) {
             std::fprintf(stderr, "%s\n",
                          format(cmsg::sam_mask_bad_shape, {bad}).c_str());
             return 2;
         }
+        app::apply_mask_set(run.stencil, set);
     } else {
         run.stencil.detect_border = true;
     }
@@ -679,7 +731,7 @@ int cmd_mask(const Options& o) {
             const auto it = groups.find(rel);
             if (it != groups.end() && !it->second.empty())
                 write_preview(it->second.front(), fm, preview_left,
-                              o.image_gamut, o.image_is_linear);
+                              o.image_gamut, o.image_is_linear, o.image_exposure);
             preview_left.clear();
         }
     };
@@ -767,9 +819,7 @@ int cmd_video(const Options& o) {
 
 // Defined in src/app/cli/sam_extract.cpp; it has its own option set, so it
 // parses its own argv rather than sharing Options above.
-#ifdef SS_HAVE_VIDEO
 int sam_cli_extract(int argc, char** argv);
-#endif
 
 int spirula_sam_main(int argc, char** argv) {
     app::set_program_name(argc > 0 ? argv[0] : nullptr, "spirula sam");
@@ -780,16 +830,9 @@ int spirula_sam_main(int argc, char** argv) {
         return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "extract") == 0) {
-#ifdef SS_HAVE_VIDEO
         int rc = sam_cli_extract(argc - 1, argv + 1);
         nn::shutdown();
         return rc;
-#else
-        std::fprintf(stderr, "%s\n",
-                     format(cmsg::sam_extract_needs_decoder,
-                            {app::program_name()}).c_str());
-        return 1;
-#endif
     }
 
     Options o;

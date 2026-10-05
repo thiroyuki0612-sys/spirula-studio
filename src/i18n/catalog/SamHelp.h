@@ -627,6 +627,21 @@ SS_MSG(common_image_linear,
     RU("кадры -- линейный свет, а не экранное кодирование"),
     TR("kareler ekran kodlu değil, doğrusal ışıktır"));
 
+SS_MSG(common_image_exposure,
+    EN("brighten what the model sees, in linear light: auto, or stops"),
+    JA("モデルに渡す画像をリニア光で明るくします: auto または段数"),
+    ZH_HANS("在线性光中调亮模型看到的图像：auto 或档数"),
+    ZH_HANT("在線性光中調亮模型看到的影像：auto 或檔數"),
+    KO("모델이 보는 이미지를 선형 광에서 밝게 합니다: auto 또는 스톱 수"),
+    DE("was das Modell sieht, in linearem Licht aufhellen: auto oder Blendenstufen"),
+    FR("éclaircir en lumière linéaire ce que voit le modèle : auto, ou des diaphs"),
+    ES("aclarar en luz lineal lo que ve el modelo: auto, o pasos"),
+    PT("clarear em luz linear o que o modelo vê: auto, ou pontos"),
+    IT("schiarire in luce lineare ciò che vede il modello: auto, o stop"),
+    NL("wat het model ziet in lineair licht lichter maken: auto, of stops"),
+    RU("осветлить в линейном свете то, что видит модель: auto или ступени"),
+    TR("modelin gördüğünü doğrusal ışıkta aydınlat: auto ya da durak sayısı"));
+
 SS_MSG(common_max_size,
     EN("downscale inputs to fit (default 1600, 0 = off)"),
     JA("入力をこの大きさに収まるよう縮小します（既定 1600、0 で無効）"),
@@ -1049,6 +1064,50 @@ SS_MSG(xh_threads,
     RU("потоки кодировщика изображений (по умолчанию: ядра - 1)"),
     TR("görüntü kodlayıcı iş parçacıkları (varsayılan: çekirdek - 1)"));
 
+SS_MSG(xh_decoder,
+    EN("`auto` (default) decodes in-process where the build and the device can, else "
+       "with ffmpeg; `builtin` or `ffmpeg` insists on one"),
+    JA("`auto`（既定）はビルドとデバイスが対応していればプロセス内で、そうでなければ "
+       "ffmpeg でデコードします。`builtin` か `ffmpeg` でどちらかに固定します"),
+    ZH_HANS("`auto`（默认）在构建和设备支持时于进程内解码，否则用 ffmpeg；`builtin` 或 "
+            "`ffmpeg` 固定使用其一"),
+    ZH_HANT("`auto`（預設）在建置與裝置支援時於行程內解碼，否則用 ffmpeg；`builtin` 或 "
+            "`ffmpeg` 固定使用其一"),
+    KO("`auto`(기본값)는 빌드와 장치가 지원하면 프로세스 안에서, 아니면 ffmpeg 으로 "
+       "디코딩합니다. `builtin` 이나 `ffmpeg` 은 한쪽으로 고정합니다"),
+    DE("`auto` (Vorgabe) dekodiert im Prozess, wo Build und Gerät es können, sonst mit "
+       "ffmpeg; `builtin` oder `ffmpeg` besteht auf einem"),
+    FR("`auto` (défaut) décode dans le processus quand la compilation et le "
+       "périphérique le permettent, sinon avec ffmpeg ; `builtin` ou `ffmpeg` impose "
+       "l'un des deux"),
+    ES("`auto` (por defecto) decodifica dentro del proceso cuando la compilación y el "
+       "dispositivo lo permiten, si no con ffmpeg; `builtin` o `ffmpeg` obliga a uno"),
+    PT("`auto` (padrão) decodifica no processo quando a compilação e o dispositivo "
+       "permitem, senão com ffmpeg; `builtin` ou `ffmpeg` obriga a um deles"),
+    IT("`auto` (predefinito) decodifica nel processo dove build e dispositivo lo "
+       "consentono, altrimenti con ffmpeg; `builtin` o `ffmpeg` ne impone uno"),
+    NL("`auto` (standaard) decodeert in het proces waar build en apparaat dat kunnen, "
+       "anders met ffmpeg; `builtin` of `ffmpeg` dwingt er één af"),
+    RU("`auto` (по умолчанию) декодирует внутри процесса, где это позволяют сборка и "
+       "устройство, иначе через ffmpeg; `builtin` или `ffmpeg` требует одного из них"),
+    TR("`auto` (varsayılan) derleme ve aygıt destekliyorsa süreç içinde, değilse "
+       "ffmpeg ile çözer; `builtin` ya da `ffmpeg` birini zorunlu kılar"));
+
+SS_MSG(xh_ffmpeg,
+    EN("the ffmpeg executable (default: `ffmpeg` on PATH)"),
+    JA("ffmpeg の実行ファイル（既定: PATH 上の `ffmpeg`）"),
+    ZH_HANS("ffmpeg 可执行文件（默认：PATH 中的 `ffmpeg`）"),
+    ZH_HANT("ffmpeg 執行檔（預設：PATH 中的 `ffmpeg`）"),
+    KO("ffmpeg 실행 파일(기본값: PATH 의 `ffmpeg`)"),
+    DE("die ffmpeg-Programmdatei (Vorgabe: `ffmpeg` im PATH)"),
+    FR("l'exécutable ffmpeg (défaut : `ffmpeg` dans le PATH)"),
+    ES("el ejecutable de ffmpeg (por defecto: `ffmpeg` en el PATH)"),
+    PT("o executável do ffmpeg (padrão: `ffmpeg` no PATH)"),
+    IT("l'eseguibile di ffmpeg (predefinito: `ffmpeg` nel PATH)"),
+    NL("het ffmpeg-programma (standaard: `ffmpeg` in PATH)"),
+    RU("исполняемый файл ffmpeg (по умолчанию: `ffmpeg` из PATH)"),
+    TR("ffmpeg yürütülebilir dosyası (varsayılan: PATH'teki `ffmpeg`)"));
+
 SS_MSG(xh_model,
     EN("SAM 3 checkpoint"),
     JA("SAM 3 のチェックポイント"),
@@ -1358,41 +1417,55 @@ SS_MSG(mh_out,
 SS_MSG(mh_shape,
     EN("use these shapes instead of looking for a border; ';' separates them "
        "and a leading '-' cuts one out again. A path ending in .svg reads the "
-       "shapes the GUI saves"),
+       "shapes the GUI saves; a file saved for one camera brings the rest of its "
+       "set, each for its own camera folder"),
     JA("枠を探す代わりにこの図形を使います。';' で区切り、先頭の '-' はその"
        "図形の内側を逆に取り除きます。.svg で終わるパスは GUI が保存した"
-       "図形を読み込みます"),
+       "図形を読み込みます。カメラ 1 台分として保存したファイルは、同じ組の"
+       "ほかのファイルも読み込み、それぞれ自分のカメラのフォルダーに使います"),
     ZH_HANS("用这些图形，而不是去找边框；用 ';' 分隔，开头的 '-' 表示反过来去掉"
-            "该图形内部。以 .svg 结尾的路径会读取 GUI 保存的图形"),
+            "该图形内部。以 .svg 结尾的路径会读取 GUI 保存的图形；为某一台相机保存的"
+            "文件会连同同组的其他文件一起读取，各自用于自己的相机文件夹"),
     ZH_HANT("用這些圖形，而不是去找邊框；用 ';' 分隔，開頭的 '-' 表示反過來去掉"
-            "該圖形內部。以 .svg 結尾的路徑會讀取 GUI 儲存的圖形"),
+            "該圖形內部。以 .svg 結尾的路徑會讀取 GUI 儲存的圖形；為某一台相機儲存的"
+            "檔案會連同同組的其他檔案一起讀取，各自用於自己的相機資料夾"),
     KO("테두리를 찾는 대신 이 도형을 씁니다. ';' 로 나누고, 앞의 '-' 는 그 "
        "도형 안쪽을 도로 없앱니다. .svg 로 끝나는 경로는 GUI 가 저장한 "
-       "도형을 읽습니다"),
+       "도형을 읽습니다. 카메라 한 대용으로 저장한 파일은 같은 묶음의 나머지 "
+       "파일도 함께 읽어 각자 자기 카메라 폴더에 씁니다"),
     DE("diese Formen benutzen statt einen Rand zu suchen; ';' trennt sie, ein "
        "vorangestelltes '-' schneidet eine wieder heraus. Ein Pfad auf .svg "
-       "liest die Formen, die die GUI speichert"),
+       "liest die Formen, die die GUI speichert; eine für eine Kamera gespeicherte "
+       "Datei bringt den Rest ihres Satzes mit, jede für ihren eigenen Kameraordner"),
     FR("utiliser ces formes au lieu de chercher un bord ; ';' les sépare, un "
        "'-' en tête en retire une au contraire. Un chemin en .svg lit les "
-       "formes que l'interface enregistre"),
+       "formes que l'interface enregistre ; un fichier enregistré pour une caméra "
+       "amène le reste de son ensemble, chacun pour son propre dossier de caméra"),
     ES("usar estas formas en vez de buscar un borde; ';' las separa y un '-' "
        "delante recorta una en lugar de conservarla. Una ruta terminada en .svg "
-       "lee las formas que guarda la interfaz"),
+       "lee las formas que guarda la interfaz; un archivo guardado para una cámara "
+       "trae el resto de su juego, cada uno para su propia carpeta de cámara"),
     PT("usar estas formas em vez de procurar uma borda; ';' as separa e um '-' "
        "à frente recorta uma em vez de mantê-la. Um caminho terminado em .svg "
-       "lê as formas que a interface salva"),
+       "lê as formas que a interface salva; um arquivo salvo para uma câmera "
+       "traz o resto do seu conjunto, cada um para a sua pasta de câmera"),
     IT("usare queste forme invece di cercare un bordo; ';' le separa e un '-' "
        "davanti ne ritaglia una invece di tenerla. Un percorso che termina in "
-       ".svg legge le forme salvate dall'interfaccia"),
+       ".svg legge le forme salvate dall'interfaccia; un file salvato per una "
+       "fotocamera porta con sé il resto del suo insieme, ognuno per la propria "
+       "cartella di fotocamera"),
     NL("deze vormen gebruiken in plaats van een rand te zoeken; ';' scheidt "
        "ze, een '-' ervoor snijdt er juist een weg. Een pad op .svg leest de "
-       "vormen die de GUI opslaat"),
+       "vormen die de GUI opslaat; een bestand dat voor één camera is opgeslagen "
+       "brengt de rest van zijn set mee, elk voor zijn eigen cameramap"),
     RU("взять эти фигуры вместо поиска края; ';' разделяет их, а '-' в начале "
        "наоборот вырезает фигуру. Путь, оканчивающийся на .svg, читает фигуры, "
-       "сохранённые в интерфейсе"),
+       "сохранённые в интерфейсе; файл, сохранённый для одной камеры, подтягивает "
+       "остальные файлы своего набора, каждый для своей папки камеры"),
     TR("kenar aramak yerine bu biçimleri kullan; ';' ayırır, baştaki '-' ise "
        "biçimin içini tersine keser. .svg ile biten bir yol, arayüzün kaydettiği "
-       "biçimleri okur"));
+       "biçimleri okur; tek bir kamera için kaydedilmiş bir dosya, takımının geri "
+       "kalanını da getirir, her biri kendi kamera klasörü için"));
 
 SS_MSG(mh_shrink,
     EN("pull the found boundary inwards, as a fraction of its radius "
@@ -1544,6 +1617,135 @@ SS_MSG(mh_replace,
        "пересечение — так это и ложится поверх масок модели"),
     TR("çıktı klasöründeki maskeleri üzerine yaz; bu olmadan kesişimleri "
        "alınır, bu da modelin maskelerinin üstüne böyle biner"));
+
+// ---- the non-SAM models ----
+
+SS_MSG(model_kinds,
+    EN("--model also takes birefnet or birefnet-lite (or a BiRefNet .safetensors "
+       "file), which masks the main subject of each image by itself: it reads no "
+       "prompt, and the subject is what is kept."),
+    JA("--model には birefnet または birefnet-lite（あるいは BiRefNet の "
+       ".safetensors ファイル）も指定できます。これは各画像の主な被写体を自動で"
+       "マスクします。プロンプトは読まず、残るのは被写体です。"),
+    ZH_HANS("--model 也接受 birefnet 或 birefnet-lite（或 BiRefNet 的 .safetensors "
+            "文件），它会自动遮出每张图像的主体：不读取提示词，保留的是主体。"),
+    ZH_HANT("--model 也接受 birefnet 或 birefnet-lite（或 BiRefNet 的 .safetensors "
+            "檔案），它會自動遮出每張影像的主體：不讀取提示詞，保留的是主體。"),
+    KO("--model 에는 birefnet 이나 birefnet-lite(또는 BiRefNet 의 .safetensors "
+       "파일)도 줄 수 있습니다. 각 이미지의 주 피사체를 스스로 마스크하며, "
+       "프롬프트는 읽지 않고 남기는 쪽이 피사체입니다."),
+    DE("--model nimmt auch birefnet oder birefnet-lite (oder eine "
+       "BiRefNet-.safetensors-Datei); das maskiert das Hauptmotiv jedes Bildes von "
+       "selbst: es liest keinen Prompt, und behalten wird das Motiv."),
+    FR("--model accepte aussi birefnet ou birefnet-lite (ou un fichier .safetensors "
+       "de BiRefNet), qui masque seul le sujet principal de chaque image : il ne lit "
+       "aucune consigne, et c'est le sujet qui est conservé."),
+    ES("--model también admite birefnet o birefnet-lite (o un archivo .safetensors "
+       "de BiRefNet), que enmascara por sí solo el sujeto principal de cada imagen: "
+       "no lee ninguna indicación y lo que se conserva es el sujeto."),
+    PT("--model também aceita birefnet ou birefnet-lite (ou um arquivo .safetensors "
+       "do BiRefNet), que mascara sozinho o objeto principal de cada imagem: não lê "
+       "nenhum comando, e o que se mantém é o objeto."),
+    IT("--model accetta anche birefnet o birefnet-lite (o un file .safetensors di "
+       "BiRefNet), che maschera da solo il soggetto principale di ogni immagine: non "
+       "legge alcun prompt e ciò che resta è il soggetto."),
+    NL("--model neemt ook birefnet of birefnet-lite (of een "
+       "BiRefNet-.safetensors-bestand), dat uit zichzelf het hoofdonderwerp van elk "
+       "beeld maskeert: het leest geen prompt, en het onderwerp blijft behouden."),
+    RU("--model принимает также birefnet или birefnet-lite (или файл .safetensors "
+       "BiRefNet): он сам выделяет главный объект каждого изображения, запрос не "
+       "читает, и сохраняется именно объект."),
+    TR("--model ayrıca birefnet ya da birefnet-lite (veya bir BiRefNet .safetensors "
+       "dosyası) alır; bu, her görüntünün ana öznesini kendiliğinden maskeler: istem "
+       "okumaz ve korunan özne olur."));
+
+SS_MSG(opt_detector,
+    EN("Grounding DINO for the text prompts: gdino-tiny, gdino-base or a "
+       ".safetensors file. It finds the boxes and the SAM model segments them, which "
+       "lets a SAM 2 checkpoint take words"),
+    JA("テキストプロンプトに使う Grounding DINO：gdino-tiny、gdino-base、または "
+       ".safetensors ファイル。矩形を見つけ、それを SAM モデルが分割するので、"
+       "SAM 2 のチェックポイントでも言葉で指定できます"),
+    ZH_HANS("用于文本提示的 Grounding DINO：gdino-tiny、gdino-base 或一个 "
+            ".safetensors 文件。它找出框，再由 SAM 模型分割，从而让 SAM 2 "
+            "检查点也能接受文字"),
+    ZH_HANT("用於文字提示的 Grounding DINO：gdino-tiny、gdino-base 或一個 "
+            ".safetensors 檔案。它找出框，再由 SAM 模型分割，從而讓 SAM 2 "
+            "檢查點也能接受文字"),
+    KO("텍스트 프롬프트에 쓰는 Grounding DINO: gdino-tiny, gdino-base 또는 "
+       ".safetensors 파일. 상자를 찾으면 SAM 모델이 그것을 분할하므로 SAM 2 "
+       "체크포인트도 말로 지정할 수 있습니다"),
+    DE("Grounding DINO für die Textprompts: gdino-tiny, gdino-base oder eine "
+       ".safetensors-Datei. Es findet die Kästen, und das SAM-Modell segmentiert sie; "
+       "so versteht auch ein SAM-2-Prüfpunkt Wörter"),
+    FR("Grounding DINO pour les consignes textuelles : gdino-tiny, gdino-base ou un "
+       "fichier .safetensors. Il trouve les boîtes et le modèle SAM les segmente, ce "
+       "qui permet à un point de contrôle SAM 2 de comprendre des mots"),
+    ES("Grounding DINO para las indicaciones de texto: gdino-tiny, gdino-base o un "
+       "archivo .safetensors. Encuentra las cajas y el modelo SAM las segmenta, lo que "
+       "permite a un punto de control de SAM 2 entender palabras"),
+    PT("Grounding DINO para os comandos de texto: gdino-tiny, gdino-base ou um "
+       "arquivo .safetensors. Ele encontra as caixas e o modelo SAM as segmenta, o que "
+       "permite que um ponto de verificação do SAM 2 entenda palavras"),
+    IT("Grounding DINO per i prompt testuali: gdino-tiny, gdino-base o un file "
+       ".safetensors. Trova i riquadri e il modello SAM li segmenta, così anche un "
+       "checkpoint SAM 2 capisce le parole"),
+    NL("Grounding DINO voor de tekstprompts: gdino-tiny, gdino-base of een "
+       ".safetensors-bestand. Het vindt de kaders en het SAM-model segmenteert ze, "
+       "zodat ook een SAM 2-controlepunt woorden begrijpt"),
+    RU("Grounding DINO для текстовых запросов: gdino-tiny, gdino-base или файл "
+       ".safetensors. Он находит рамки, а модель SAM их сегментирует, так что и "
+       "контрольная точка SAM 2 понимает слова"),
+    TR("Metin istemleri için Grounding DINO: gdino-tiny, gdino-base ya da bir "
+       ".safetensors dosyası. Kutuları bulur, SAM modeli de onları bölütler; böylece "
+       "bir SAM 2 denetim noktası da sözcükleri anlar"));
+
+SS_MSG(opt_detector_threshold,
+    EN("how sure Grounding DINO must be of a box, 0..1 (default 0.3)"),
+    JA("Grounding DINO が矩形を採用する確信度、0..1（既定 0.3）"),
+    ZH_HANS("Grounding DINO 采纳一个框所需的把握，0..1（默认 0.3）"),
+    ZH_HANT("Grounding DINO 採納一個框所需的把握，0..1（預設 0.3）"),
+    KO("Grounding DINO 가 상자를 받아들이는 확신도, 0..1(기본값 0.3)"),
+    DE("wie sicher sich Grounding DINO eines Kastens sein muss, 0..1 (Standard 0.3)"),
+    FR("certitude qu'il faut à Grounding DINO pour garder une boîte, 0..1 (0.3 par "
+       "défaut)"),
+    ES("cuánta seguridad necesita Grounding DINO para aceptar una caja, 0..1 (0.3 por "
+       "defecto)"),
+    PT("quanta certeza o Grounding DINO precisa ter de uma caixa, 0..1 (padrão 0.3)"),
+    IT("quanto Grounding DINO deve essere sicuro di un riquadro, 0..1 (predefinito "
+       "0.3)"),
+    NL("hoe zeker Grounding DINO van een kader moet zijn, 0..1 (standaard 0.3)"),
+    RU("насколько Grounding DINO должен быть уверен в рамке, 0..1 (по умолчанию 0.3)"),
+    TR("Grounding DINO'nun bir kutudan ne kadar emin olması gerektiği, 0..1 "
+       "(varsayılan 0.3)"));
+
+SS_MSG(trk_remove_prompted,
+    EN("black = the prompted objects: the default, except with BiRefNet, whose "
+       "subject is kept unless this is given"),
+    JA("黒 = プロンプトで指した対象。これが既定ですが、BiRefNet だけはこの指定が"
+       "ない限り被写体を残します"),
+    ZH_HANS("黑色 = 提示指定的对象。这是默认值，只有 BiRefNet 例外：除非给出此项，"
+            "它保留主体"),
+    ZH_HANT("黑色 = 提示指定的對象。這是預設值，只有 BiRefNet 例外：除非給出此項，"
+            "它保留主體"),
+    KO("검은색 = 프롬프트가 가리킨 대상. 기본값이지만 BiRefNet 만은 이것을 주지 "
+       "않는 한 피사체를 남깁니다"),
+    DE("schwarz = die geprompteten Objekte: Standard, außer bei BiRefNet, das sein "
+       "Motiv behält, solange dies nicht angegeben ist"),
+    FR("noir = les objets désignés : le défaut, sauf avec BiRefNet, qui conserve son "
+       "sujet sauf si cette option est donnée"),
+    ES("negro = los objetos indicados: el valor por defecto, salvo con BiRefNet, que "
+       "conserva su sujeto a menos que se dé esta opción"),
+    PT("preto = os objetos indicados: o padrão, exceto com o BiRefNet, que mantém o "
+       "objeto a menos que esta opção seja dada"),
+    IT("nero = gli oggetti indicati: il predefinito, tranne con BiRefNet, che tiene il "
+       "soggetto a meno che non si dia questa opzione"),
+    NL("zwart = de geprompte objecten: de standaard, behalve bij BiRefNet, dat zijn "
+       "onderwerp behoudt tenzij dit gegeven is"),
+    RU("чёрный = объекты из запроса: так по умолчанию, кроме BiRefNet, который "
+       "сохраняет свой объект, если этот флаг не задан"),
+    TR("siyah = istemin gösterdiği nesneler: varsayılan budur; yalnızca BiRefNet, bu "
+       "verilmedikçe öznesini korur"));
 
 }  // namespace samhelp
 }  // namespace msg

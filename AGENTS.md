@@ -51,8 +51,8 @@ tools/guictl.py             drive the GUI from a script -- list the widgets on
                               screen, click them, read the framebuffer back.
                               tools/gui_mcp.py is the same surface as an MCP
                               server; docs/notes/gui-automation.md
-reference/scripts/          dataset preprocessing CLI tools (Python, standalone;
-                              mask.py is embedded into the GUI binary)
+reference/scripts/          dataset preprocessing CLI tools (Python, standalone,
+                              run by hand; nothing in the build uses them)
 reference/python/           hand-run tools on NO code path: eval_lpips.py,
                               benchmark.py, camera_utils.py (the unported
                               orientation_method / center_method reference,
@@ -71,6 +71,8 @@ a file's include lines tell you which subsystems it depends on.
 ```
 src/
 ├── core/                   Tensor.h, Camera.h, Common.cuh, GradQuant.cuh, …
+│                             GraphCut.h -- the normalized cut the SfM mapper
+│                             and the scene partitioner both use
 │                             the types and device helpers everything uses
 ├── primitives/             Primitive*.cuh — 3DGS / Mip / 3DGUT traits
 │                             (compile-time types, not runtime branches)
@@ -82,7 +84,16 @@ src/
 │   ├── optim/  densify/  loss/  background/  visualize/
 ├── engine/                 Engine*.cpp/.h — the training engine
 │                             (process-global singleton)
-├── data/                   DataManager (image cache / prefetch / warp) and
+├── data/                   DataManager (image cache / prefetch / warp),
+│   │                         Region.h / LabelField.h / RegionProgram.h (regions
+│   │                         of space with an inside test on host and device,
+│   │                         and the labelled seed field that gives every point
+│   │                         one owner), RegionMesh.h (a region's boundary as
+│   │                         triangles, for drawing), ScenePartition.h (split a scene into
+│   │                         parts that train separately -- READ
+│   │                         docs/notes/scene-partition.md), RoiDocument.h (the
+│   │                         ROI editor's shape list, and which <dataset>/roi/*.json
+│   │                         a run trains in -- docs/notes/roi-editor.md)
 │   └── parsers/              COLMAP / Nerfstudio / Metashape readers
 ├── mesh/                   meshing pipeline: Delaunay3D, UV, export/import, and
 │                             MeshingDevice.h -- the DEVICE SEAM the portable
@@ -96,8 +107,14 @@ src/
 │                             runtime (nn/vk/), tensor + ops + Slang kernels,
 │                             host image I/O. Knows nothing about any model.
 │                             -- READ src/nn/README.md
-├── sam/                    SAM 2 / SAM 3 segmentation, on top of nn/
-│                             -- READ src/sam/README.md
+├── sam/                    SAM 2 / SAM 3 segmentation, on top of nn/, and
+│                             Masking.h, the ONE mask policy every model goes
+│                             through -- READ src/sam/README.md
+├── swin/                   the Swin backbone gdino/ and birefnet/ share
+├── gdino/                  Grounding DINO: text -> boxes, which gives SAM 2
+│                             words (lang-segment-anything) -- src/gdino/README.md
+├── birefnet/               BiRefNet: the main subject's mask, no prompt
+│                             -- src/birefnet/README.md
 ├── aliked/                 ALIKED keypoints + LightGlue, on top of nn/
 │                             -- READ src/aliked/README.md
 ├── loma/                   LoMa: DaD keypoints + DeDoDe descriptors + the LoMa
@@ -108,7 +125,8 @@ src/
 ├── moge/                   MoGe-2 point maps + normals + a sky mask, on top of
 │                             nn/. The DEFAULT geometry model
 │                             -- READ src/moge/README.md
-├── video/                  container demux + VK_KHR_video_decode_*, and the
+├── video/                  container demux (HEIC stills too) +
+│                             VK_KHR_video_decode_*, and the
 │                             VK_KHR_video_encode_* encoder behind `spirula
 │                             encode`, on top of nn/. PATENT-GATED: compiled
 │                             only with SS_ENABLE_PATENTED=ON -- READ
@@ -130,7 +148,8 @@ src/
 │   │                         sfm_main.cpp (sfm), sam_main.cpp (sam),
 │   │                         geometry_main.cpp (depth + normals)
 │   ├── FrameExtract.{h,cpp}  video -> sharp frames (`spirula sam extract` also
-│   │                         masks them in the same pass; the GUI masks after)
+│   │                         masks them in the same pass; the GUI masks after),
+│   │                         decoded by Vulkan Video or ffmpeg (FrameDecode.h)
 │   ├── Pano360.{h,cpp}     a 360 camera's own frame layout (the GoPro MAX
 │   │                         .360 EAC packing) and the views a dataset wants
 │   │                         out of it -- one implementation, both decode paths
@@ -159,6 +178,8 @@ src/
 │                             seeding -> step loop -> eval. Both the CLI and
 │                             the GUI drive this; it lives in the engine
 │                             library (cmake/sources.txt), not the app targets.
+│                             TrainForecast.{h,cpp} beside it is the run's ETA
+│                             and VRAM forecast -- docs/notes/train-forecast.md
 ├── config/                 TrainConfig.h — the training config's single source
 │                             of truth: one X-macro row per flag, hand-written.
 │                             TrainConfigJson.h is the one flat-JSON encoding
@@ -174,7 +195,9 @@ src/
 ├── checkpoint/             Resume.{h,cpp} — config.json -> TrainConfig,
 │                             checkpoint resolution, resumability checks;
 │                             Adapt.{h,cpp} — host-side layout adaptation
-│                             (the state restore itself is EngineCheckpoint.cpp)
+│                             (the state restore itself is EngineCheckpoint.cpp);
+│                             SplatMerge.{h,cpp} — the parts of a partitioned
+│                             scene back into one model
 ├── generated/  instantiations/    GENERATED — do not hand-edit
 └── external/               vendored (miniz, stb, npy)
 ```
@@ -198,7 +221,9 @@ Everything builds into **one executable**, `<build dir>/spirula`: no arguments o
 the GUI (`-DSS_BUILD_GUI=OFF` leaves a headless binary that needs neither a
 display nor GL), `spirula sfm|train|sam|mesh` are the command-line tools, and
 a symlink named `spirula-sfm` runs that tool directly (`src/app/Tools.h`);
-`spirula geometry` estimates depth and normals for a dataset. The GUI runs
+`spirula geometry` estimates depth and normals for a dataset, and `spirula
+partition` splits one into parts that train separately and merges the models
+back (docs/notes/scene-partition.md). The GUI runs
 reconstruction and that estimation by re-running itself as a child process, so
 there is no sibling binary to keep next to it. `-DSS_SEPARATE_TOOLS=ON` also builds the old
 per-tool executables.
@@ -212,9 +237,9 @@ both needs no reconfiguring and no `-B`. Options:
 `SS_SEPARATE_TOOLS`.
 Full matrix and per-platform notes: `docs/build.md`.
 
-**`SS_ENABLE_PATENTED` is OFF by default and should stay that way in
-anything you commit.** It gates `src/video/` -- the H.264 / H.265 / AV1
-bitstream parsers, the VK_KHR_video_decode_* driver and the
+**`SS_ENABLE_PATENTED` is OFF by default and should stay that way in anything
+you commit.** It gates `src/video/` -- the H.264 / H.265 / AV1 bitstream
+parsers, the HEIF container reader, the VK_KHR_video_decode_* driver and the
 VK_KHR_video_encode_* encoder behind `spirula encode` -- which is the only
 patent-encumbered code in the tree. With it off, everything that wanted it
 shells out to ffmpeg instead; no feature disappears, a subprocess appears. See
@@ -268,9 +293,9 @@ Rules:
 
 ## The Vulkan-only subsystems
 
-`src/sfm/`, `src/nn/`, `src/sam/`, `src/aliked/`, `src/loma/`,
-`src/metric3d/`, `src/moge/` and `src/video/` are **not** part of the
-two-backend rule below. They are Vulkan + Slang only, carry their own Vulkan
+`src/sfm/`, `src/nn/`, `src/sam/`, `src/swin/`, `src/gdino/`, `src/birefnet/`,
+`src/aliked/`, `src/loma/`, `src/metric3d/`, `src/moge/` and `src/video/` are
+**not** part of the two-backend rule below. They are Vulkan + Slang only, carry their own Vulkan
 context, share nothing with the training engine, and are absent from a CUDA
 build by default (`SS_BUILD_SFM` / `SS_BUILD_SAM` default OFF there).
 Nothing in them goes through `cmake/sources.txt`.
@@ -279,6 +304,7 @@ The layering runs one way and must keep doing so:
 
 ```
 app/gui, app/cli ──► sam ──────┬──► nn ──► nn/vk
+                 │    └► gdino, birefnet ──► swin ──► nn
                  ├──► aliked ──┤
                  ├──► loma ────┤
                  ├──► metric3d ┤
@@ -563,7 +589,10 @@ no ceremony — do not ask, do not leave a note saying you removed it.
   `SS_POOL_ALIAS_POISON=1` fills the arena at every phase switch so a read
   that outlives its phase becomes NaNs a parity test catches, and
   `SS_POOL_ALIAS=0` turns the whole thing off. Read
-  `docs/notes/vram-splat-x-img.md` before adding a row.
+  `docs/notes/vram-splat-x-img.md` before adding a row. A buffer whose
+  length follows the LIVE splat count goes in `POOL_LIVE_SPLAT_TABLE`, so it
+  is sized for `cap_max` once: the trainer's VRAM forecast assumes only
+  `splat x img` grows during a run.
 - **`SS_PROFILE=1`** enables the per-stage backend timing breakdown
   (H2D / D2H / D2D / memset / device / host), header-only, both backends, plus
   a per-category VRAM breakdown after any run that trained. What the biggest
@@ -614,8 +643,9 @@ no ceremony — do not ask, do not leave a note saying you removed it.
   metric scale and a sky mask. `app/GeometryModel.h` is the one seam between
   them and `--model` is what picks; a caller that reaches past it into
   `metric3d::` or `moge::` has hard-coded a family.
-- **Segmentation weights are never committed or bundled.** They are Meta's,
-  under Meta's licences, and SAM 3's is not GPLv3-compatible. They are fetched
+- **Segmentation weights are never committed or bundled.** SAM's are Meta's,
+  under Meta's licences, and SAM 3's is not GPLv3-compatible; Grounding DINO
+  (Apache-2.0) and BiRefNet (MIT) are fetched the same way for consistency. They are fetched
   at run time after the user has seen the terms -- `src/app/gui/ModelCache.cpp`
   is where that policy lives, and it is the only place that should grow one.
 - **The inference layer's VRAM pool is process-wide and grow-only**, so
@@ -630,6 +660,13 @@ no ceremony — do not ask, do not leave a note saying you removed it.
   `MeshJob` and not added there saves, loads, and quietly runs at its default.
   `preset_roundtrip_test` is the guard: it moves every field the table
   names off its default and compares after a round trip.
+- **What a dataset run reuses is decided in one place, from fields you have to
+  list.** `app/gui/DatasetPlan.h` compares, per step, the settings its output
+  was made with (`frames_fields`, `masks_fields`, `model_fields`,
+  `geometry_fields`) against the workspace's `.spirula-dataset.json`; a setting
+  that changes a step's output and is not in its list is silently reused
+  across. The panel and both runners ask the same function -- never decide
+  "rerun this?" anywhere else. docs/notes/dataset-rerun.md.
 - **A mesh format lives in four places and reads back in two.** `kMeshFormats`
   (`app/gui/MeshJob.h`) is the GUI's list, `parse_one_mesh_format` and
   `write_mesh` (`mesh/MeshExport.cpp`) are the writer, `check_export_support`

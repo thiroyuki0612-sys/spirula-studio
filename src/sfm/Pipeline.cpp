@@ -24,29 +24,34 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "core/ColorSpace.h"
 #include "core/Env.h"
-#include "core/ExrImage.h"
+#include "core/ImageFile.h"
 #include "sfm/core/Cancel.h"
 #include "sfm/core/Events.h"
+#include "sfm/core/Exif.h"
 #include "sfm/core/Progress.h"
 #include "sfm/core/CameraSetup.h"
 #include "sfm/core/FeatureCompaction.h"
 #include "sfm/core/Log.h"
 #include "sfm/core/Features.h"
 #include "sfm/core/Image.h"
+#include "sfm/core/LensCalibration.h"
 #include "sfm/core/ImageLoader.h"
 #include "sfm/core/Manifest.h"
 #include "sfm/core/Mask.h"
 #include "sfm/core/Matches.h"
+#include "sfm/core/SerialWorker.h"
 #include "sfm/feature/Matcher.h"
 #include "sfm/feature/PairSelection.h"
 #include "sfm/feature/Pairing.h"
 #include "sfm/feature/RigPairs.h"
+#include "sfm/feature/GpsPairs.h"
 #include "sfm/feature/Sift.h"
 #include "sfm/feature/Verification.h"
 #include "sfm/geometry/TwoView.h"
@@ -74,7 +79,7 @@ bool isImageExt(const std::string& e) {
     std::string s;
     for (char c : e) s += (char)std::tolower((unsigned char)c);
     return s == ".jpg" || s == ".jpeg" || s == ".png" || s == ".bmp" || s == ".tga" ||
-           s == ".ppm" || s == ".pgm" || s == ".exr";
+           s == ".ppm" || s == ".pgm" || s == ".exr" || s == ".tif" || s == ".tiff";
 }
 
 // macOS AppleDouble sidecars (`._<name>`, written on exFAT / NTFS / SMB) keep
@@ -186,19 +191,44 @@ std::string metricReason(const MetricFit& f) {
                 M::metric_fail_collinear,
                 {L::num(100.0 * f.perp_frac, 2), L::num(100.0 * kMetricMinPerpFraction, 1),
                  L::num(f.perp_frac > 0 ? 1.0 / f.perp_frac : 0.0, 0)});
+        case MetricFail::Tilted:
+            return spirula::i18n::format(
+                M::metric_fail_tilted,
+                {L::num(f.T.scale, 4), L::num(f.scale_3d > 0 ? f.T.scale / f.scale_3d : 0.0, 1),
+                 L::num(f.scale_3d, 4)});
         case MetricFail::None: break;
     }
     return {};
 }
 
-// A telemetry file read once per run, with the queries the gauge fit makes.
-struct LoadedCapture {
-    SensorCapture cap;
-    SensorTimeline timeline;
-};
 
-std::vector<std::unique_ptr<LoadedCapture>> loadCaptures(const SfmConfig& cfg, bool verbose) {
-    std::vector<std::unique_ptr<LoadedCapture>> out;
+static void logLensPlan(const LensPlan& p) {
+    const std::string lens = p.lens.lens, model = camInfo(p.model).cli_name;
+    if (p.use == LensUse::Used) {
+        const std::vector<double>& v = p.fit.params;
+        L::out(Tag::Run, M::lens_calib_used,
+               {p.prefix, lens, p.source, model, L::num(v[0], 2), L::num(v[1], 2), L::num(v[2], 2),
+                L::num(v[3], 2), L::num(p.fit.max_px, 2)});
+        return;
+    }
+    std::string why;
+    switch (p.use) {
+        case LensUse::Override: why = M::lens_skip_override.get(); break;
+        case LensUse::DatasetWide: why = M::lens_skip_dataset.get(); break;
+        case LensUse::Model: why = spirula::i18n::format(M::lens_skip_model, {model}); break;
+        case LensUse::Size:
+            why = spirula::i18n::format(M::lens_skip_size,
+                                        {(long long)p.width, (long long)p.height,
+                                         (long long)p.lens.width, (long long)p.lens.height});
+            break;
+        case LensUse::NoImages: why = M::lens_skip_images.get(); break;
+        case LensUse::Used: break;
+    }
+    L::out(Tag::Run, M::lens_calib_skipped, {p.prefix, lens, p.source, why});
+}
+
+SensorCaptures loadSensorCaptures(const SfmConfig& cfg, bool verbose) {
+    SensorCaptures out;
     if (cfg.sensor_gauge == "none") return out;
     for (const TelemetryInput& in : cfg.telemetry_inputs) {
         Telemetry t;
@@ -220,6 +250,7 @@ std::vector<std::unique_ptr<LoadedCapture>> loadCaptures(const SfmConfig& cfg, b
         lc->cap.time_offset = in.time_offset;
         lc->cap.readout = t.frame_readout;
         lc->cap.timeline = &lc->timeline;
+        lc->carrier = t.carrier;
         L::out(Tag::Orient, M::sensor_file,
                {in.path, t.camera.empty() ? "?" : t.camera, L::num(c.gyro.rate_hz, 0),
                 L::num(c.accel.rate_hz, 0), L::num(c.orientation.rate_hz, 0),
@@ -230,10 +261,11 @@ std::vector<std::unique_ptr<LoadedCapture>> loadCaptures(const SfmConfig& cfg, b
         }
         if (verbose)
             for (const std::string& w : c.warnings) L::err_raw(Tag::Orient, w);
-        out.push_back(std::move(lc));
+        out.loaded.push_back(std::move(lc));
     }
     return out;
 }
+
 
 const spirula::i18n::Msg& extrinsicReason(ExtrinsicFail f) {
     switch (f) {
@@ -343,10 +375,242 @@ void reportSensorGauge(size_t i, const SensorGaugeResult& r,
 // The gauge each model is written in: the video's sensors, else the attitude
 // the images record, then a metric reference, else the orient frame -- each
 // where it fits. False when a metric frame was asked for and missed.
+
+// ---------------------------------------------------------------------------
+// The sensors as priors (sfm/map/SensorPriors.h)
+// ---------------------------------------------------------------------------
+
+std::vector<Camera> perImageCameras(const CameraSetup& cs, size_t num_images) {
+    std::vector<Camera> percam(num_images);
+    for (size_t i = 0; i < num_images && i < cs.ids.size(); i++) {
+        auto it = cs.cameras.find(cs.ids[i]);
+        if (it != cs.cameras.end()) percam[i] = it->second;
+    }
+    return percam;
+}
+
+// --metric-gps none states no GPS centre factor, so no registration is checked
+// against the GPS; positions still propose pairs. Otherwise it sets the factors'
+// radius, whether "full" trusts them, and the flat fit.
+static SensorPriorOptions sensorPriorOptions(const SfmConfig& cfg) {
+    SensorPriorOptions po;
+    po.max_dt = cfg.sensor_max_dt;
+    po.gps_centres = cfg.metricGps();
+    po.gps_max_error = cfg.metricGps() && cfg.metric_max_error > 0 ? cfg.metric_max_error : 5.0;
+    po.gps_max_error_frac = cfg.metric_max_error_frac;
+    po.trusted_position = cfg.metric_gps == "full";
+    po.gps_flat = cfg.metric_gps == "horizontal";
+    po.verbose = !cfg.quiet;
+    return po;
+}
+
+bool isPhoneMake(const std::string& make) {
+    std::string m;
+    for (char c : make) m += (char)std::tolower((unsigned char)c);
+    while (!m.empty() && (m.back() == ' ' || m.back() == '\0')) m.pop_back();
+    static const char* const phones[] = {"apple",  "google", "samsung", "huawei", "honor",
+                                         "xiaomi", "oneplus", "oppo",   "vivo",   "motorola",
+                                         "realme", "nothing"};
+    for (const char* p : phones)
+        if (m == p) return true;
+    return false;
+}
+
+MetricGpsChoice resolveMetricGps(const MetricGpsEvidence& e) {
+    if (e.positions_file) return {"none", MetricGpsWhy::Positions};
+    if (e.telemetry_gps > 0)
+        return e.telemetry_dji == e.telemetry_gps
+                   ? MetricGpsChoice{"full", MetricGpsWhy::DjiTelemetry}
+                   : MetricGpsChoice{"horizontal", MetricGpsWhy::OtherTelemetry};
+    // Three fixes is the least a similarity fits; fewer is no GPS worth a mode.
+    if (e.exif_fixes >= 3) {
+        if (2 * e.exif_phone > e.exif_fixes) return {"horizontal", MetricGpsWhy::ExifPhone};
+        if (10 * e.exif_no_alt > e.exif_fixes) return {"horizontal", MetricGpsWhy::ExifNoAltitude};
+        return {"full", MetricGpsWhy::ExifAltitude};
+    }
+    return {"none", MetricGpsWhy::NoGps};
+}
+
+MetricGpsEvidence metricGpsEvidence(const SfmConfig& cfg, const SensorCaptures& sensors,
+                                    const std::string& imagedir) {
+    MetricGpsEvidence e;
+    e.positions_file = !cfg.metric_positions.empty();
+    for (const auto& lc : sensors.loaded) {
+        if (!lc->timeline.hasGps()) continue;
+        e.telemetry_gps++;
+        e.telemetry_dji += lc->carrier == TelemetryCarrier::DjiDvtm;
+    }
+    if (imagedir.empty() || e.positions_file || e.telemetry_gps) return e;
+    std::error_code walk, ec;
+    for (auto it = fs::recursive_directory_iterator(
+             imagedir, fs::directory_options::follow_directory_symlink, walk);
+         !walk && it != fs::recursive_directory_iterator(); it.increment(walk)) {
+        if (!it->is_regular_file(ec) || isSidecar(it->path()) ||
+            !isImageExt(it->path().extension().string()))
+            continue;
+        const ExifData x = readExif(it->path().string());
+        if (!x.has_gps) continue;
+        e.exif_fixes++;
+        e.exif_no_alt += !x.has_alt;
+        if (isPhoneMake(x.make)) {
+            e.exif_phone++;
+            e.phone_make = x.make;
+        }
+    }
+    return e;
+}
+
+MetricGpsChoice applyMetricGpsAuto(SfmConfig& cfg, const SensorCaptures& sensors,
+                                   const std::string& imagedir) {
+    if (cfg.metric_gps != "auto") return {cfg.metric_gps, MetricGpsWhy::Explicit};
+    const MetricGpsEvidence e = metricGpsEvidence(cfg, sensors, imagedir);
+    const MetricGpsChoice c = resolveMetricGps(e);
+    cfg.metric_gps = c.mode;
+    switch (c.why) {
+        case MetricGpsWhy::Positions: L::out(Tag::Run, M::metric_gps_auto_positions); break;
+        case MetricGpsWhy::DjiTelemetry:
+            L::out(Tag::Run, M::metric_gps_auto_dji, {(long long)e.telemetry_gps});
+            break;
+        case MetricGpsWhy::OtherTelemetry:
+            L::out(Tag::Run, M::metric_gps_auto_telemetry,
+                   {(long long)(e.telemetry_gps - e.telemetry_dji), (long long)e.telemetry_gps});
+            break;
+        case MetricGpsWhy::ExifAltitude:
+            L::out(Tag::Run, M::metric_gps_auto_exif_alt, {(long long)e.exif_fixes});
+            break;
+        case MetricGpsWhy::ExifNoAltitude:
+            L::out(Tag::Run, M::metric_gps_auto_exif_noalt,
+                   {(long long)e.exif_no_alt, (long long)e.exif_fixes});
+            break;
+        case MetricGpsWhy::ExifPhone:
+            L::out(Tag::Run, M::metric_gps_auto_exif_phone,
+                   {(long long)e.exif_phone, (long long)e.exif_fixes, e.phone_make});
+            break;
+        case MetricGpsWhy::NoGps:
+        case MetricGpsWhy::Explicit: L::out(Tag::Run, M::metric_gps_auto_none); break;
+    }
+    return c;
+}
+
+std::unique_ptr<TelemetryPriors> makeSensorPriors(const SfmConfig& cfg,
+                                                  const SensorCaptures& sensors,
+                                                  const MatchesDatabase& db,
+                                                  const std::vector<uint32_t>& cam_ids) {
+    if (sensors.empty() || !(cfg.sensor_verify || cfg.sensor_map || cfg.sensor_pairs))
+        return nullptr;
+    std::vector<std::string> names;
+    names.reserve(db.images.size());
+    for (const ImageEntry& im : db.images) names.push_back(im.name);
+    auto priors = std::make_unique<TelemetryPriors>(sensors.caps(), names, cam_ids,
+                                                    sensorPriorOptions(cfg));
+    return priors->timedImages() ? std::move(priors) : nullptr;
+}
+
+
+// Relative rotations from two-view geometry on bearings, over the pairs the
+// source can calibrate on, then the source's own hand-eye fit.
+void calibrateSensorPriorsFrom(TelemetryPriors& priors, const std::vector<FeatureSet>& feats,
+                               const std::vector<std::pair<uint32_t, uint32_t>>& pairs,
+                               const std::vector<std::vector<FeatureMatch>>& matches,
+                               const std::vector<Camera>& cams, const TwoViewOptions& tvopt,
+                               int threads, bool verbose, bool inliers_only) {
+    std::vector<size_t> use;
+    for (size_t p = 0; p < pairs.size() && p < matches.size(); p++)
+        if (priors.calibrationPair(pairs[p].first, pairs[p].second) &&
+            (int)matches[p].size() >= std::max(30, tvopt.min_num_inliers))
+            use.push_back(p);
+    // Spread over the capture rather than its first minute: the fit wants
+    // every axis turned, and 600 pairs are plenty for a tenth of a degree.
+    const size_t kMax = 600;
+    if (use.size() > kMax) {
+        std::vector<size_t> thin;
+        const double step = (double)use.size() / (double)kMax;
+        for (size_t k = 0; k < kMax; k++) thin.push_back(use[(size_t)(k * step)]);
+        use.swap(thin);
+    }
+    std::vector<PairRotationObs> obs(use.size());
+    std::vector<char> ok(use.size(), 0);
+    std::atomic<size_t> next{0};
+    auto worker = [&] {
+        for (size_t k = next++; k < use.size(); k = next++) {
+            const size_t p = use[k];
+            const uint32_t i = pairs[p].first, j = pairs[p].second;
+            const std::vector<FeatureMatch>& m = matches[p];
+            std::vector<Vec3> b1(m.size()), b2(m.size());
+            for (size_t q = 0; q < m.size(); q++) {
+                b1[q] = cams[i].bearing({feats[i].keypoints[m[q].idx1].x, feats[i].keypoints[m[q].idx1].y});
+                b2[q] = cams[j].bearing({feats[j].keypoints[m[q].idx2].x, feats[j].keypoints[m[q].idx2].y});
+            }
+            TwoViewOptions tvo = tvopt;
+            tvo.recover_pose = true;
+            // Verified inliers carry no outliers to reject; the homography
+            // test still has to say whether the pair has a translation.
+            const double sc = 0.5 * (feats[i].pixelScale() + feats[j].pixelScale());
+            tvo.ransac.max_error = tvopt.ransac.max_error * sc /
+                                   std::max(1.0, 0.5 * (cams[i].focal() + cams[j].focal()));
+            if (inliers_only) tvo.ransac.max_num_trials = std::min(tvo.ransac.max_num_trials, 500);
+            const TwoViewGeometry g = estimateTwoViewBearing(b1, b2, tvo);
+            if (g.config != TwoViewConfig::Uncalibrated || !g.has_pose || g.num_inliers < 30) continue;
+            obs[k] = {i, j, g.pose.R};
+            ok[k] = 1;
+        }
+    };
+    const unsigned hc = std::thread::hardware_concurrency();
+    const int nt = std::max(1, std::min<int>(threads > 0 ? threads : (hc ? (int)hc : 1),
+                                             (int)std::max<size_t>(use.size(), 1)));
+    std::vector<std::thread> pool;
+    for (int t = 0; t < nt; t++) pool.emplace_back(worker);
+    for (std::thread& t : pool) t.join();
+    std::vector<PairRotationObs> kept;
+    for (size_t k = 0; k < obs.size(); k++)
+        if (ok[k]) kept.push_back(obs[k]);
+    priors.calibrateFromPairs(kept);
+    if (!verbose) return;
+    for (size_t c = 0; c < priors.timeOffsets().size(); c++)
+        if (priors.timeOffsets()[c].found)
+            L::err(Tag::Match, M::sensor_time_offset,
+                   {priors.groups().empty() ? std::string("?") : std::to_string(c),
+                    L::num(1000.0 * priors.timeOffsets()[c].offset, 1),
+                    (long long)priors.timeOffsets()[c].pairs});
+    for (const SensorGroupState& g : priors.groups()) {
+        if (g.ok)
+            L::out(Tag::Match, M::sensor_prior_calib,
+                   {g.name, (long long)g.pairs, L::num(g.fit.sig_rot_deg, 2)});
+        else
+            L::err(Tag::Match, M::sensor_prior_calib_failed,
+                   {g.name, (long long)g.pairs, extrinsicReason(g.fit.reason).get()});
+    }
+}
+
+
+void calibrateSensorPriors(TelemetryPriors& priors, const std::vector<FeatureSet>& feats,
+                           const std::vector<std::pair<uint32_t, uint32_t>>& pairs,
+                           const std::vector<std::vector<FeatureMatch>>& matches,
+                           const std::vector<Camera>& cams, const TwoViewOptions& tvopt,
+                           int threads, bool verbose) {
+    calibrateSensorPriorsFrom(priors, feats, pairs, matches, cams, tvopt, threads, verbose, false);
+}
+
+void calibrateSensorPriorsFromDatabase(TelemetryPriors& priors, const MatchesDatabase& db,
+                                       const std::vector<FeatureSet>& feats,
+                                       const std::vector<Camera>& cams,
+                                       const TwoViewOptions& tvopt, int threads, bool verbose) {
+    std::vector<std::pair<uint32_t, uint32_t>> pairs;
+    std::vector<std::vector<FeatureMatch>> matches;
+    for (const TwoViewMatches& p : db.pairs) {
+        if (p.config != (int)TwoViewConfig::Uncalibrated) continue;
+        if (!priors.calibrationPair(p.image1, p.image2)) continue;
+        pairs.emplace_back(p.image1, p.image2);
+        matches.push_back(p.matches);
+    }
+    calibrateSensorPriorsFrom(priors, feats, pairs, matches, cams, tvopt, threads, verbose, true);
+}
+
+
 bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
-                     const std::string& imagedir, bool verbose,
-                     std::vector<ModelGauge>& gauge) {
-    const bool gps = cfg.metric_gps != "none";
+              const std::string& imagedir, bool verbose,
+              std::vector<ModelGauge>& gauge, const SensorCaptures* sensors) {
+    const bool gps = cfg.metricGps();
     const bool flat = cfg.metric_gps == "horizontal";
     const bool file = !cfg.metric_positions.empty();
     // A portrait capture's up is 90 degrees off its images'; `apply` already
@@ -369,10 +633,14 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
     gauge.assign(models.size(), ModelGauge());
 
     // ---- the video's own sensors -----------------------------------------
-    const std::vector<std::unique_ptr<LoadedCapture>> loaded = loadCaptures(cfg, verbose);
+    SensorCaptures own;
+    if (!sensors) {
+        own = loadSensorCaptures(cfg, verbose);
+        sensors = &own;
+    }
+    const std::vector<std::unique_ptr<LoadedCapture>>& loaded = sensors->loaded;
     if (!loaded.empty()) {
-        std::vector<SensorCapture> caps;
-        for (const auto& lc : loaded) caps.push_back(lc->cap);
+        std::vector<SensorCapture> caps = sensors->caps();
         SensorGaugeOptions opt;
         opt.mode = cfg.sensor_gauge == "up" ? SensorMode::Up : SensorMode::Auto;
         opt.gps_full = cfg.metric_gps == "full";
@@ -559,11 +827,11 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
     return true;
 }
 
-// An EXR carries its own colour space. Reading it needs no declaration -- the
-// decoder falls back to the file's own -- but --point-color and the reported
-// space both do, so adopt it before any stage runs.
-void adoptExrColorSpace(SfmConfig& cfg, const std::string& imagedir,
-                        const std::set<std::string>& seen) {
+// An EXR's header or a TIFF's ICC profile carries the colour space. Reading
+// needs no declaration -- the decoder falls back to the file's own -- but
+// --point-color and the reported space both do, so adopt it before any stage.
+void adoptFileColorSpace(SfmConfig& cfg, const std::string& imagedir,
+                         const std::set<std::string>& seen) {
     const bool take_gamut = !seen.count("image-gamut");
     const bool take_linear = !seen.count("image-linear");
     if (!take_gamut && !take_linear) return;
@@ -574,18 +842,40 @@ void adoptExrColorSpace(SfmConfig& cfg, const std::string& imagedir,
         if (!it->is_regular_file(ec)) continue;
         if (!isImageExt(it->path().extension().string()) || isSidecar(it->path()))
             continue;
-        exr::Info info;
-        if (!exr::declared_color_space(it->path().string(), info)) return;
-        if (take_gamut) cfg.image_gamut = info.gamut;
-        if (take_linear) cfg.image_is_linear = info.is_linear;
+        imagefile::DeclaredColor d;
+        if (!imagefile::declared_color_space(it->path().string(), d)) return;
+        if (take_gamut) cfg.image_gamut = d.gamut;
+        if (take_linear) cfg.image_is_linear = d.is_linear;
         const std::string name =
             cfg.image_gamut.empty() ? "Rec.709" : cfg.image_gamut;
-        if (take_linear) L::out(Tag::Run, M::run_exr_color, {name});
-        else             L::out(Tag::Run, M::run_exr_gamut_from_file, {name});
-        if (take_gamut && !info.gamut_known)
-            L::warn(Tag::Run, M::run_exr_gamut_unknown, {});
+        if (take_linear)
+            L::out(Tag::Run, cfg.image_is_linear ? M::run_file_color_linear
+                                                 : M::run_file_color_display,
+                   {d.format, name});
+        else
+            L::out(Tag::Run, M::run_file_gamut_from_file, {d.format, name});
+        if (take_gamut && !d.gamut_known)
+            L::warn(Tag::Run, M::run_file_gamut_unknown, {d.format});
         return;
     }
+}
+
+// What the detectors were shown, and a linear capture that never passed white:
+// the give-away of display-encoded pixels read as linear (docs/notes/exr.md).
+void reportDecodedLight(const SfmConfig& cfg, const ExtractStats& stats) {
+    if (!stats.decoded) return;
+    auto stops = [](float gain) {
+        char buf[16];
+        std::snprintf(buf, sizeof buf, "%+.1f", std::log2(gain));
+        return std::string(buf);
+    };
+    if (cfg.exposure.automatic)
+        L::out(Tag::Extract, M::extract_exposure_auto,
+               {stops(stats.gain_min), stops(stats.gain_max)});
+    else if (cfg.exposure.active())
+        L::out(Tag::Extract, M::extract_exposure_fixed, {stops(stats.gain_max)});
+    if (cfg.image_is_linear && stats.peak == 1.0f)
+        L::warn(Tag::Extract, M::extract_linear_peak_one, {});
 }
 
 void reportFeatureCompaction(const FeatureCompactionStats& stats) {
@@ -695,6 +985,59 @@ void writeRigs(const fs::path& dir, const Reconstruction& m, const RigTable* rig
     }
 }
 
+RigTable readRigs(const fs::path& dir, Reconstruction& m) {
+    std::ifstream f(dir / "rigs.txt");
+    if (!f) return {};
+    struct Row {
+        std::string member, ref;
+        Quat q;
+        Vec3 t;
+        uint32_t frames = 0;
+        double spread = 0;
+    };
+    std::vector<std::string> order;
+    std::map<std::string, std::vector<Row>> rows;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream ss(line);
+        std::string rig;
+        Row r;
+        if (!(ss >> rig >> r.member >> r.ref >> r.q[0] >> r.q[1] >> r.q[2] >> r.q[3] >> r.t.x >>
+              r.t.y >> r.t.z))
+            throw std::runtime_error((dir / "rigs.txt").string() + ": cannot read '" + line + "'");
+        ss >> r.frames >> r.spread;
+        if (!rows.count(rig)) order.push_back(rig);
+        rows[rig].push_back(r);
+    }
+    std::vector<RigDef> defs;
+    for (const std::string& name : order) {
+        RigDef d;
+        d.name = name;
+        for (const Row& r : rows[name]) d.members.push_back({r.member});
+        defs.push_back(std::move(d));
+    }
+    uint32_t n = 0;
+    for (const auto& kv : m.images) n = std::max(n, kv.first + 1);
+    std::vector<std::string> names(n);
+    for (const auto& kv : m.images) names[kv.first] = kv.second.name;
+    RigTable rigs = buildRigTable(names, defs);
+    m.rigs.assign(rigs.rigs.size(), RigCalib{});
+    for (size_t r = 0; r < order.size(); r++) {
+        const std::vector<Row>& rs = rows[order[r]];
+        RigCalib& c = m.rigs[r];
+        c.resize(rs.size());
+        for (size_t k = 0; k < rs.size(); k++) {
+            c.cam_from_rig[k] = {quaternionToRotation(rs[k].q), rs[k].t};
+            c.established[k] = 1;
+            c.support[k] = rs[k].frames;
+            c.spread_deg[k] = rs[k].spread;
+            if (rs[k].member == rs[k].ref) c.ref = (int)k;
+        }
+    }
+    return rigs;
+}
+
 // Every reconstruction as <dir>/0, <dir>/1, ... (D41) -- COLMAP's layout for a
 // view graph that is not connected. `sparse/0` has the most 3D points, so a
 // single-model dataset still writes exactly `sparse/0`.
@@ -795,6 +1138,36 @@ static std::map<std::string, std::string> imageStemMap(const std::string& imaged
     return stem2name;
 }
 
+std::unique_ptr<ExifGpsPriors> makeExifGpsPriors(const SfmConfig& cfg, const std::string& imagedir,
+                                                 const MatchesDatabase& db, const CameraSetup& cams,
+                                                 bool verbose) {
+    if (imagedir.empty() || !(cfg.sensor_map || cfg.sensor_pairs)) return nullptr;
+    const std::map<std::string, std::string> stem2name = imageStemMap(imagedir);
+    std::vector<std::optional<Geodetic>> fixes(db.images.size());
+    int with = 0, no_alt = 0;
+    for (size_t i = 0; i < db.images.size(); i++) {
+        auto it = stem2name.find(db.images[i].name);
+        if (it == stem2name.end()) continue;
+        const ExifData e = readExif((fs::path(imagedir) / it->second).string());
+        if (!e.has_gps) continue;
+        // As the metric gauge reads it: a fix with no altitude sits at sea level.
+        fixes[i] = Geodetic{e.lat_deg, e.lon_deg, e.alt_m};
+        with++;
+        if (!e.has_alt) no_alt++;
+    }
+    if (!with) return nullptr;
+    if (verbose)
+        L::out(Tag::Match, M::metric_gps_read,
+               {(long long)with, (long long)db.images.size(), (long long)no_alt});
+    std::vector<char> level(db.images.size(), 0);
+    if (cfg.level_erp)
+        for (size_t i = 0; i < level.size() && i < cams.ids.size(); i++) {
+            auto it = cams.cameras.find(cams.ids[i]);
+            level[i] = it != cams.cameras.end() && it->second.isSpherical();
+        }
+    return std::make_unique<ExifGpsPriors>(fixes, sensorPriorOptions(cfg), std::move(level));
+}
+
 // The unregistered list as a data file, when SS_UNREG_LOG names one: per
 // folder, every image no model took. Data only -- names need no translation;
 // full coverage writes nothing.
@@ -849,7 +1222,7 @@ void printAssembly(const AssembleStats& ast, size_t models, Tag tag) {
            {format_duration(ast.finishSecs()), (long long)f.splits,
             (long long)f.duplicate_splits, (long long)f.reseeded_models,
             (long long)f.dropped_redundant, (long long)f.audited_repaired,
-            (long long)f.audited_out});
+            (long long)f.audited_out, (long long)f.seams_welded});
 }
 
 // Flat or bottom-up, per --mapper; flat is the default and what the
@@ -1081,11 +1454,13 @@ void sweepStaleFeatures(const fs::path& outdir, const std::set<fs::path>& live) 
 // mtime comparison, because a re-run that regenerated the frames or the masks
 // leaves everything else about the settings identical.
 bool featuresAreCurrent(const fs::path& feat, const fs::path& img,
-                        const std::string& mask, uint32_t& count) {
+                        const std::string& mask, const std::string& feature_mask,
+                        uint32_t& count) {
     std::error_code fe, ie, me;
     const auto t = fs::last_write_time(feat, fe);
     if (fe || t < fs::last_write_time(img, ie) || ie) return false;
-    if (!mask.empty() && t < fs::last_write_time(mask, me) && !me) return false;
+    for (const std::string* m : {&mask, &feature_mask})
+        if (!m->empty() && t < fs::last_write_time(*m, me) && !me) return false;
     return peekFeatures(feat.string(), count);
 }
 
@@ -1095,16 +1470,22 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
                      const SfmConfig& cfg, ExtractStats& stats, bool reuse) {
     const SiftOptions& opt = cfg.sift;
     const std::string& maskdir = cfg.mask_dir;
+    const std::string& fmaskdir = cfg.feature_mask_dir;
     // Recursive: per-folder intrinsics (ppisp) keep images in images/<camera>/
     // and the folder is the grouping key (D17). A mask directory nested inside
     // is skipped -- masks are PNGs too, and would double the image count with
     // garbage views.
     std::error_code skip_ec;
-    const bool skip_masks = !maskdir.empty() && fs::is_directory(maskdir, skip_ec);
+    std::vector<std::string> skip;
+    for (const std::string* d : {&maskdir, &fmaskdir})
+        if (!d->empty() && fs::is_directory(*d, skip_ec)) skip.push_back(*d);
     std::vector<fs::path> found;
     for (auto it = fs::recursive_directory_iterator(imagedir, fs::directory_options::follow_directory_symlink);
          it != fs::recursive_directory_iterator(); ++it) {
-        if (skip_masks && it->is_directory() && fs::equivalent(it->path(), maskdir, skip_ec)) {
+        if (it->is_directory() &&
+            std::any_of(skip.begin(), skip.end(), [&](const std::string& d) {
+                return fs::equivalent(it->path(), d, skip_ec);
+            })) {
             it.disable_recursion_pending();
             continue;
         }
@@ -1159,6 +1540,7 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
     lopt.want_color = true;  // sample per-keypoint colors while the image is hot
     lopt.gamut = cfg.image_gamut;
     lopt.is_linear = cfg.image_is_linear;
+    lopt.exposure = cfg.exposure;
     lopt.flip_mask = cfg.flip_mask;
     lopt.apply_exif_orientation = cfg.exif_orientation == "apply";
     if (cfg.decode_budget_mb > 0)
@@ -1193,6 +1575,24 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
             L::warn(Tag::Extract, M::extract_some_unmasked,
                     {(long long)stats.unmasked_images, stats.first_unmasked});
     }
+    // An image without one keeps all its features, as under --masks; a tree
+    // matching nothing is not fatal here, since the sky is often absent.
+    MaskIndex fmasks(fmaskdir);
+    if (!fmaskdir.empty() && !fmasks.valid())
+        L::warn(Tag::Extract, M::extract_mask_dir_missing, {fmaskdir});
+    if (fmasks.valid()) {
+        lopt.feature_mask_paths.assign(paths.size(), std::string());
+        size_t matched = 0;
+        for (size_t k = 0; k < paths.size(); k++) {
+            std::string& fp = lopt.feature_mask_paths[k];
+            fp = fmasks.find(relativeTo(paths[k], imagedir).generic_string());
+            if (fp.empty()) continue;
+            matched++;
+            if (lopt.mask_paths.empty() || lopt.mask_paths[k].empty()) stats.masked_images++;
+        }
+        L::out(Tag::Extract, M::extract_masks_matched,
+               {(long long)matched, (long long)paths.size(), fmaskdir});
+    }
 
     // Where each image's features belong, and what a previous run already put
     // there. The total the bar counts is the capture, not the work left.
@@ -1213,7 +1613,10 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
             uint32_t count = 0;
             const std::string mask =
                 k < lopt.mask_paths.size() ? lopt.mask_paths[k] : std::string();
-            if (!featuresAreCurrent(outs[k], paths[k], mask, count)) {
+            const std::string fmask = k < lopt.feature_mask_paths.size()
+                                          ? lopt.feature_mask_paths[k]
+                                          : std::string();
+            if (!featuresAreCurrent(outs[k], paths[k], mask, fmask, count)) {
                 todo.push_back(k);
                 continue;
             }
@@ -1241,11 +1644,14 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
                 sorted_dims[i] = sorted_dims[k];
                 outs[i] = std::move(outs[k]);
                 if (!lopt.mask_paths.empty()) lopt.mask_paths[i] = std::move(lopt.mask_paths[k]);
+                if (!lopt.feature_mask_paths.empty())
+                    lopt.feature_mask_paths[i] = std::move(lopt.feature_mask_paths[k]);
             }
             paths.resize(todo.size());
             sorted_dims.resize(todo.size());
             outs.resize(todo.size());
             if (!lopt.mask_paths.empty()) lopt.mask_paths.resize(todo.size());
+            if (!lopt.feature_mask_paths.empty()) lopt.feature_mask_paths.resize(todo.size());
         }
     }
     if (paths.empty()) {
@@ -1264,75 +1670,103 @@ int extractDirectory(const std::string& imagedir, const fs::path& outdir,
     std::unique_ptr<IFeatureExtractor> ext =
         createFeatureExtractor(cfg.features, opt, cfg.aliked, cfg.loma);
     if (opt.verbose) L::err(Tag::Extract, M::extract_frontend, {ext->name()});
+    // Everything after extract() reads only the image and its features, so it
+    // runs on its own thread while the device works on the next image.
+    static const std::string kNoPath;
+    auto postProcess = [&](size_t k, GrayImage& img, FeatureSet& f) {
+        if (img.exif_mirror_dropped && !stats.warned_exif_mirror) {
+            stats.warned_exif_mirror = true;
+            L::warn(Tag::Extract, M::extract_exif_mirror_dropped,
+                    {fs::path(paths[k]).filename().string()});
+        }
+        sampleFeatureColors(f, img);
+        uint32_t dropped = 0;
+        const std::string& mpath =
+            k < lopt.mask_paths.size() && !lopt.mask_paths[k].empty() ? lopt.mask_paths[k]
+            : k < lopt.feature_mask_paths.size() ? lopt.feature_mask_paths[k]
+                                                 : kNoPath;
+        if (!mpath.empty()) {
+            if (img.mask.empty()) {
+                stats.mask_unreadable++;
+                L::warn(Tag::Extract, M::extract_mask_undecodable,
+                        {mpath, fs::path(paths[k]).filename().string()});
+            } else {
+                // img's own size, not the probed one: `apply` turned both.
+                checkMaskShape(mpath, img.mask, {img.orig_width, img.orig_height});
+                const uint32_t before = f.count();
+                dropped = applyMask(f, img.mask);
+                stats.masked_out += dropped;
+                // An inverted mask, or one whose keep value is 0, masks
+                // an image away entirely -- invisible until the model is
+                // short of images. Warn once; the run continues.
+                if (before && dropped == before && !stats.warned_empty) {
+                    stats.warned_empty = true;
+                    L::warn(Tag::Extract, M::extract_mask_empty,
+                            {mpath, fs::path(paths[k]).filename().string()});
+                }
+            }
+        }
+        // Back to the source file's coordinates (D46), so cameras.bin
+        // describes the user's images and not the working copy. Everything
+        // reading a keypoint against the decoded image has already run.
+        finishFeatures(f, img);
+        fs::create_directories(outs[k].parent_path());
+        writeFeatures(outs[k].string(), f);
+        stats.features += f.count();
+        stats.features_new += f.count();
+        stats.images++;
+        Event ev;
+        ev.kind = Event::Kind::ImageExtracted;
+        ev.stage = Stage::Extract;
+        ev.done = stats.images;
+        ev.total = (int64_t)n_all;
+        ev.name = fs::path(paths[k]).filename().string();
+        ev.width = img.orig_width;
+        ev.height = img.orig_height;
+        ev.features = f.count();
+        ev.masked = dropped;
+        events::emit(ev);
+        // The picture the reel draws, from the copy already in hand.
+        if (progress::enabled()) {
+            fs::path stem = relativeTo(paths[k], imagedir);
+            stem.replace_extension();
+            progress::thumbnail(stem.generic_string(), img.rgb.data(),
+                                img.width, img.height);
+        }
+    };
+    SerialWorker post;  // after postProcess: joined before it goes away
+    auto extractOne = [&](size_t k, GrayImage& img, const GrayImage* next) {
+        stats.gain_min = stats.decoded ? std::min(stats.gain_min, img.gain) : img.gain;
+        stats.gain_max = stats.decoded ? std::max(stats.gain_max, img.gain) : img.gain;
+        stats.peak = std::max(stats.peak, img.peak);
+        stats.decoded++;
+        FeatureSet f = ext->extractAhead(img, next);
+        std::vector<float>().swap(img.data);  // the worker needs color, not luma
+        post.submit([&postProcess, k, img = std::move(img), f = std::move(f)]() mutable {
+            postProcess(k, img, f);
+        });
+    };
+    // One image is held back, so the extractor knows the next one and can
+    // queue its device work before finishing this one on the host.
+    std::optional<std::pair<size_t, GrayImage>> held;
     loadImagesInOrder(
         paths, plan, lopt,
         [&](size_t k, GrayImage& img) {
             cancel::check();
-            if (img.exif_mirror_dropped && !stats.warned_exif_mirror) {
-                stats.warned_exif_mirror = true;
-                L::warn(Tag::Extract, M::extract_exif_mirror_dropped,
-                        {fs::path(paths[k]).filename().string()});
-            }
-            FeatureSet f = ext->extract(img);
-            sampleFeatureColors(f, img);
-            uint32_t dropped = 0;
-            if (!lopt.mask_paths.empty() && !lopt.mask_paths[k].empty()) {
-                if (img.mask.empty()) {
-                    stats.mask_unreadable++;
-                    L::warn(Tag::Extract, M::extract_mask_undecodable,
-                            {lopt.mask_paths[k],
-                             fs::path(paths[k]).filename().string()});
-                } else {
-                    // img's own size, not the probed one: `apply` turned both.
-                    checkMaskShape(lopt.mask_paths[k], img.mask,
-                                   {img.orig_width, img.orig_height});
-                    const uint32_t before = f.count();
-                    dropped = applyMask(f, img.mask);
-                    stats.masked_out += dropped;
-                    // An inverted mask, or one whose keep value is 0, masks
-                    // an image away entirely -- invisible until the model is
-                    // short of images. Warn once; the run continues.
-                    if (before && dropped == before && !stats.warned_empty) {
-                        stats.warned_empty = true;
-                        L::warn(Tag::Extract, M::extract_mask_empty,
-                                {lopt.mask_paths[k],
-                                 fs::path(paths[k]).filename().string()});
-                    }
-                }
-            }
-            // Back to the source file's coordinates (D46), so cameras.bin
-            // describes the user's images and not the working copy. Everything
-            // reading a keypoint against the decoded image has already run.
-            finishFeatures(f, img);
-            fs::create_directories(outs[k].parent_path());
-            writeFeatures(outs[k].string(), f);
-            stats.features += f.count();
-            stats.features_new += f.count();
-            stats.images++;
-            Event ev;
-            ev.kind = Event::Kind::ImageExtracted;
-            ev.stage = Stage::Extract;
-            ev.done = stats.images;
-            ev.total = (int64_t)n_all;
-            ev.name = fs::path(paths[k]).filename().string();
-            ev.width = img.orig_width;
-            ev.height = img.orig_height;
-            ev.features = f.count();
-            ev.masked = dropped;
-            events::emit(ev);
-            // The picture the reel draws, from the copy already in hand.
-            if (progress::enabled()) {
-                fs::path stem = relativeTo(paths[k], imagedir);
-                stem.replace_extension();
-                progress::thumbnail(stem.generic_string(), img.rgb.data(),
-                                    img.width, img.height);
-            }
+            if (held) extractOne(held->first, held->second, &img);
+            held.emplace(k, std::move(img));
         },
         [&](size_t k, const std::string& err) {
             L::fail(Tag::Extract, M::extract_failed_file,
                     {fs::path(paths[k]).filename().string(), err});
             stats.failed++;
         });
+    if (held) {
+        cancel::check();
+        extractOne(held->first, held->second, nullptr);
+    }
+    post.finish();
+    reportDecodedLight(cfg, stats);
     events::stage_end(Stage::Extract);
     return 0;
 }
@@ -1414,6 +1848,18 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
     stats.images = n_images;
     std::vector<std::string> image_names(n_images);
     for (size_t i = 0; i < n_images; i++) image_names[i] = db.images[i].name;
+    // The grouping first: the sensors are keyed by camera group, and the GPS
+    // pairs below go into the list before it is written.
+    if (calib) {
+        calib->cameras = buildCameras(db.images, feats, calib->setup);
+        if (verbose) printCameraSetup(Tag::Match, calib->cameras, calib->setup, feats.size());
+        if (calib->sensors)
+            calib->priors = makeSensorPriors(cfg, *calib->sensors, db, calib->cameras.ids);
+        if (!calib->priors)
+            calib->exif_priors = makeExifGpsPriors(cfg, calib->image_dir, db, calib->cameras, verbose);
+    }
+    TelemetryPriors* priors = calib ? calib->priors.get() : nullptr;
+    const PriorSource* placed = calib ? calib->positionPriors() : nullptr;
 
     std::vector<std::pair<uint32_t, uint32_t>> pairs;
     // Pair selection is minutes on a large capture and used to look like a
@@ -1513,6 +1959,20 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         }
     }
 #endif
+    // Images the GPS puts near each other, whatever the shortlist thought.
+    if (placed && cfg.sensor_pairs && !reused_pairs) {
+        size_t positioned = 0;
+        const std::vector<std::pair<uint32_t, uint32_t>> nearby = gpsProximityPairs(
+            *placed, (uint32_t)n_images, cfg.sensor_pair_radius, 20, &positioned);
+        const size_t before = pairs.size();
+        pairs.insert(pairs.end(), nearby.begin(), nearby.end());
+        std::sort(pairs.begin(), pairs.end());
+        pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+        if (positioned && verbose)
+            L::err(Tag::Match, M::sensor_gps_pairs_added,
+                   {(long long)(pairs.size() - before), L::num(cfg.sensor_pair_radius, 0),
+                    (long long)positioned});
+    }
     if (res && !reused_pairs) resume::writePairs(res->dir / "pairs.bin", res->signature, pairs);
     stats.pairs = pairs.size();
     if (verbose)
@@ -1570,10 +2030,10 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         // VerifyCalibration. Everything else keeps the pixel path, where the
         // pinhole assumption is exact and results are long settled.
         BearingCache bc;
+        std::vector<Camera> percam;
+        VerifyPriorStats pstats;
         if (calib) {
             CameraSetup& cs = calib->cameras;
-            cs = buildCameras(db.images, feats, calib->setup);
-            if (verbose) printCameraSetup(Tag::Match, cs, calib->setup, feats.size());
             // Both focal searches want the same thing: putative matches for a
             // sample of pairs, spread over the list (a prefix would sample one
             // part of the capture, since pair lists are ordered). The fisheye
@@ -1634,6 +2094,36 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                 }
             }
         }
+        // The gyro's word on every pair it covers: calibrated on a sample of
+        // time-adjacent pairs first, since the rotation prior needs the
+        // IMU-to-lens rotation and the putative matches are gone after this.
+        if (priors && cfg.sensor_verify && calib) {
+            percam = perImageCameras(calib->cameras, feats.size());
+            std::vector<std::pair<uint32_t, uint32_t>> sample;
+            for (const auto& p : pairs)
+                if (priors->calibrationPair(p.first, p.second)) sample.push_back(p);
+            if (sample.size() > 900) {
+                std::vector<std::pair<uint32_t, uint32_t>> thin;
+                const double step = (double)sample.size() / 900.0;
+                for (size_t k = 0; k < 900; k++) thin.push_back(sample[(size_t)(k * step)]);
+                sample.swap(thin);
+            }
+            std::vector<std::vector<FeatureMatch>> sm, chunk;
+            for (size_t b = 0; b < sample.size(); b += 16) {
+                const size_t e = std::min(b + 16, sample.size());
+                matcher->matchBatch(feats, sample, b, e, chunk);
+                for (size_t k = b; k < e; k++) sm.push_back(std::move(chunk[k - b]));
+            }
+            const double t_c = now();
+            calibrateSensorPriors(*priors, feats, sample, sm, percam, tvopt, cfg.threads, verbose);
+            if (verbose)
+                L::diag(Tag::Match, "[prior] calibrated on %zu pair(s) in %s", sample.size(),
+                        format_duration(now() - t_c).c_str());
+            if (priors->anyRotation()) {
+                vopt.priors = priors;
+                vopt.cameras = &percam;
+            }
+        }
         // A focal either search measured was measured *on that group's own
         // pairs*, which is what focal_known means: the mapper's per-image sweep
         // has nothing to add to it and every reason to leave it alone. On a
@@ -1682,8 +2172,13 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         // offered the verifier, and verifyPairs writes its own total.
         uint64_t putative = 0;
         std::vector<TwoViewMatches> fresh =
-            verifyPairs(feats, todo, matchFn, vopt, &putative, progress);
+            verifyPairs(feats, todo, matchFn, vopt, &putative, progress, &pstats);
         stats.putative += putative;
+        if (vopt.priors && verbose && pstats.pairs)
+            L::err(Tag::Match, M::sensor_verify_summary,
+                   {(long long)pstats.pairs, (long long)pstats.kept, (long long)pstats.dropped,
+                    (long long)pstats.rescued, (long long)pstats.disagreed,
+                    (long long)pstats.contradicted});
         // Back into the pair list's order, whichever run produced each entry:
         // the mapper's seed ranking breaks ties on it, so a resumed run must
         // hand it over in the order a single run would have.
@@ -1735,7 +2230,7 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                 vopt.progress_done_base = pairs.size();
                 vopt.progress_total = pairs.size() + mates_todo.size();
                 uint64_t put2 = 0;
-                more = verifyPairs(feats, mates_todo, mateFn, vopt, &put2, progress);
+                more = verifyPairs(feats, mates_todo, mateFn, vopt, &put2, progress, &pstats);
                 stats.putative += put2;
             }
             // In the mates' order whichever run verified each, as above.
@@ -1761,6 +2256,13 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         sfm::progress::flush();
         events::stage_end(Stage::Match);
         for (const TwoViewMatches& tvm : db.pairs) stats.inliers += tvm.matches.size();
+        // Calibrated on the verified pairs when the sample could not do it
+        // (or was never asked for): the mapper wants the rotations too.
+        if (priors && calib && !priors->anyRotation()) {
+            if (percam.empty()) percam = perImageCameras(calib->cameras, feats.size());
+            calibrateSensorPriorsFromDatabase(*priors, db, feats, percam, tvopt, cfg.threads,
+                                              verbose);
+        }
     } else {
         const size_t batch = std::max(1, opt.batch_pairs);
         std::vector<std::vector<FeatureMatch>> mout;
@@ -1815,7 +2317,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
         fs::path sibling = p.parent_path() / "masks";
         if (fs::is_directory(sibling)) cfg.mask_dir = sibling.string();
     }
-    adoptExrColorSpace(cfg, _imagedir, in.explicit_flags);
+    adoptFileColorSpace(cfg, _imagedir, in.explicit_flags);
 
     fs::path ws(_workspace);
     fs::create_directories(ws);
@@ -1830,7 +2332,11 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
             (long long)cfg.sift.max_num_features});
     L::out(Tag::Run, M::run_data_type, {cfg.data_type});
     L::out(Tag::Run, M::run_cameras, {cfg.camera_model, cfg.camera_mode});
+    std::vector<LensPlan> lens_plans = collectLensPlans(cfg.telemetry_inputs, _imagedir);
+    applyLensPlans(cfg.camera, lens_plans);
+    for (const LensPlan& p : lens_plans) logLensPlan(p);
     if (!cfg.mask_dir.empty()) L::out(Tag::Run, M::run_masks, {cfg.mask_dir});
+    if (!cfg.feature_mask_dir.empty()) L::out(Tag::Run, M::run_masks, {cfg.feature_mask_dir});
     // What the two knobs moved, so a surprising run is explainable from its own
     // output rather than from reading the preset table.
     for (const PresetChange& p : in.preset_changes)
@@ -1899,6 +2405,10 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     MatchStats mstats;
     VerifyCalibration calib;
     calib.setup = cfg.camera;
+    calib.image_dir = _imagedir;
+    const SensorCaptures sensors = loadSensorCaptures(cfg, verbose);
+    applyMetricGpsAuto(cfg, sensors, _imagedir);
+    calib.sensors = &sensors;
     // What this stage's output depends on: its own settings, the extraction
     // that produced its input, and the feature files themselves -- the pair
     // lists and the journal are indices into a particular set of those.
@@ -1925,6 +2435,13 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
                 mstats.kept = mstats.pairs = db.pairs.size();
                 for (const TwoViewMatches& tvm : db.pairs) mstats.inliers += tvm.matches.size();
                 reused_matches = true;
+                calib.priors = makeSensorPriors(cfg, sensors, db, calib.cameras.ids);
+                if (calib.priors)
+                    calibrateSensorPriorsFromDatabase(
+                        *calib.priors, db, feats, perImageCameras(calib.cameras, feats.size()),
+                        cfg.twoview, cfg.threads, verbose);
+                else
+                    calib.exif_priors = makeExifGpsPriors(cfg, _imagedir, db, calib.cameras, verbose);
             }
         } catch (const std::exception& e) {
             L::warn(Tag::Match, M::match_reuse_failed, {e.what()});
@@ -1975,6 +2492,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     // measurement is what stops small components inventing their own
     // intrinsics (D45/D46).
     MapperOptions& mapopt = cfg.mapper;
+    mapopt.seam_order_by_name = cfg.pairs == "sequential";
     const CameraSetup& cs = calib.cameras;
     mapopt.initial_cameras = cs.cameras;
     mapopt.known_focal_cameras = cs.focal_known;
@@ -1994,7 +2512,8 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
         r.exit_code = 2;
         return r;
     }
-    Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs);
+    Mapper mapper(db, feats, mapopt, cs.ids, &rigs, &seqs,
+                  cfg.sensor_map ? calib.positionPriors() : nullptr);
     AssembleStats ast;
     std::vector<Reconstruction> models = runMapper(mapper, db, feats, cfg, ast);
     double t_map = now() - t0;
@@ -2012,7 +2531,7 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
 
     resolveImageNames(models, _imagedir);
     std::vector<ModelGauge> gauge;
-    const bool auto_metric = fixGauge(models, cfg, _imagedir, verbose, gauge);
+    const bool auto_metric = fixGauge(models, cfg, _imagedir, verbose, gauge, &sensors);
     recolorPoints(models, cfg);
     // The gauge is what a screen was missing: every snapshot before this one is
     // in the seed pair's frame, so a run watched to the end left a tilted model
@@ -2024,6 +2543,11 @@ AutoResult run_auto(SfmConfig& cfg, const AutoInputs& in) {
     const size_t n_cameras = models.empty() ? 0 : models.front().cameras.size();
     splitCamerasBySize(models, feats);
     writeModels(models, sparsedir, verbose, gauge, &rigs);
+    // In the mapper's frame, not the gauge's: a scorer that aligns by Sim3 reads both alike.
+    if (!ast.pre_weld.empty()) {
+        resolveImageNames(ast.pre_weld, _imagedir);
+        writeModels(ast.pre_weld, sparsedir / "pre_weld", verbose, {}, &rigs);
+    }
 
     // The mapper reports its own breakdown when `run()` returns; the passes
     // that assemble its models accumulate into the same counters.

@@ -15,6 +15,7 @@ namespace gui {
 struct MaskSettings {
     std::string prompt;              // "people; cars"
     std::string negative_prompt;
+    std::string feature_prompt;      // "sky; cloud": PrepJob::mask_feature_prompt
     bool keep_subject = false;       // prompt names what to KEEP
     // How far the boundary moves from where the model drew it, as a share of
     // the object's own size. Two, because the polarities want opposite
@@ -24,6 +25,7 @@ struct MaskSettings {
     int  max_image_size = 1600;
     float threshold = 0.5f;
     float nms = 0.1f;
+    float box_threshold = 0.3f;      // Grounding DINO's, for a Grounded model
     // Clicked objects, across every frame and every input the user visited;
     // each carries the input it was drawn on (MaskClick::source).
     std::vector<MaskClick> clicks;
