@@ -17,6 +17,15 @@
 
 Spirula Studio trains 3D Gaussian Splatting models &ndash; from raw photo/video to splat to textured mesh &ndash; in one self-contained binary. No Python/PyTorch, no separate COLMAP install. Runs on NVIDIA, AMD, Intel, and Apple GPUs via Vulkan, trains 10M full-SH Gaussians in 8 GB VRAM, and has native support for fisheye and 360° cameras.
 
+## Windows PCでの起動（初心者向け）
+
+1. [Windows版のダウンロードページ](https://github.com/harry7557558/spirula-studio/releases/latest)を開き、`windows-vulkan-x86_64.zip` をダウンロードして展開します。
+2. 展開したフォルダー内の `spirula.exe` をダブルクリックします。インストールや開発ツールは不要です。
+
+リポジトリをダウンロードした場合は、フォルダー内の `PCで起動.bat` をダブルクリックすると同じ公式版を起動できます。Windows 10/11 の 64 ビット版と Vulkan 対応 GPU が必要です。詳しくは[Windows向け起動ガイド](docs/windows-quick-start-ja.md)を参照してください。
+
+撮影から、データセット作成、学習、保存と再開、編集・書き出しまでは、[日本語操作マニュアル](docs/manual-ja.md)にまとめています。初めての方は第1部「はじめて編」、設定の意味を知りたい方は第2部「詳しく知る編」を読んでください。
+
 <div align="center">
 
 ![Spirula Studio - Open Source 3D Gaussian Splatting Pipeline](https://spirula.studio/assets/video/spirula-studio-hero.webp?md5=0ff79909f5c779509664da20b9f9dd61)
