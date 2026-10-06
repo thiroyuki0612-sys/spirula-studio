@@ -192,3 +192,27 @@ Some splats created by the author of Spirula Studio can also be found on my [Sup
 Spirula Studio (formerly spirulae-splat) is named after the now-inactive project [spirulae](https://github.com/harry7557558/spirulae), which was named after the [deep-ocean cephalopod mollusk](https://en.wikipedia.org/wiki/Spirula).
 
 Spirula Studio is developed and maintained almost entirely by one person. Issues and PRs welcome &ndash; I sometimes respond late, but rest assured that I do review them all.
+
+## GitHub 管理
+
+このプロジェクトは GitHub で管理されています。
+
+### 更新方法
+
+毎日の変更を GitHub に反映するには：
+
+```bash
+# 手動の場合
+git add .
+git commit -m "日々の更新"
+git push origin master
+```
+
+または、Claude に「このプロジェクトを更新して」と指示すれば自動実行されます。
+
+### リポジトリ
+
+- URL: https://github.com/thiroyuki0612-sys/spirula-studio.git
+- ブランチ: master
+- アカウント: thiroyuki0612-sys
+
